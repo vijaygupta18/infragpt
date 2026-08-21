@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}infragpt — create account{% endblock %}
+
+{% block style %}
+.signin { max-width: 26rem; margin: 3.5rem auto 0; }
+.signin h1 { margin-bottom: .4rem; }
+.signin form { margin-top: 1.2rem; }
+.signin label.label { display: block; margin: .9rem 0 .3rem; }
+.signin input { width: 100%; font-size: .88rem; }
+.signin .actions { margin-top: 1.1rem; display: flex; align-items: center; gap: .8rem; }
+.signin .error { color: var(--fail); font-size: .84rem; margin-top: .7rem; }
+.signin .hint { font-size: .8rem; color: var(--muted); line-height: 1.55; margin-top: 1.5rem; }
+{% endblock %}
+
+{% block content %}
+<div class="signin">
+  <h1>Create an account</h1>
+  <p class="sub">
+    Registering does not grant access. An admin approves the account first, and
+    decides what it can read.
+  </p>
+
+  <form method="post" action="/auth/register" autocomplete="off">
+    <label class="label" for="email">Work email</label>
+    <input id="email" name="email" type="email" required autofocus
+           value="{{ email or '' }}" spellcheck="false" autocomplete="username">
+
+    <label class="label" for="name">Name <span class="muted">(optional)</span></label>
+    <input id="name" name="name" type="text" autocomplete="name">
+
+    <label class="label" for="password">Password</label>
+    <input id="password" name="password" type="password" required
+           autocomplete="new-password" minlength="{{ min_length }}">
+
+    <label class="label" for="confirm">Confirm password</label>
+    <input id="confirm" name="confirm" type="password" required
+           autocomplete="new-password" minlength="{{ min_length }}">
+
+    {% if error %}<div class="error">{{ error }}</div>{% endif %}
+
+    <div class="actions">
+      <button class="primary" type="submit">Create account</button>
+      <a href="/auth/login" class="muted" style="font-size:.84rem">I already have one</a>
+    </div>
+  </form>
+
+  <p class="hint">
+    At least {{ min_length }} characters. Length is what makes a password hard
+    to guess — a long ordinary phrase beats a short complicated one.
+  </p>
+</div>
+{% endblock %}

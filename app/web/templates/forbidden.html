@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}infragpt — not permitted{% endblock %}
+
+{% block content %}
+<h1>Not permitted</h1>
+<div class="notice">
+  <p>{{ message }}</p>
+</div>
+<p class="muted">
+  Grants are per-surface and denied by default. Ask an admin for the
+  <code class="mono">{{ needed }}</code> grant if you need this screen.
+</p>
+<p><a href="/">← Back to chat</a></p>
+{% endblock %}

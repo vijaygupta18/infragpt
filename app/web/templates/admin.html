@@ -1,0 +1,276 @@
+{% extends "base.html" %}
+{% block title %}infragpt — people{% endblock %}
+
+{% block style %}
+/* ---------------------------------------------------------------------------
+   The admin's job is almost always the same: someone is waiting to be let in,
+   and the question is what they should be able to see. So the pending queue is
+   the page, and everything else is reference below it.
+
+   Grants are made by ROLE, not by ticking surfaces. Nine checkboxes and a
+   colleague waiting produces one of two outcomes — everything ticked, or a
+   week of back-and-forth — and neither is least privilege.
+--------------------------------------------------------------------------- */
+
+.queue { margin-bottom: 2.5rem; }
+.queue-empty {
+  border: 1px solid var(--line); border-radius: var(--r-container);
+  background: var(--sunken); padding: 1.4rem; color: var(--muted); font-size: .86rem;
+}
+
+.req {
+  border: 1px solid var(--line); border-radius: var(--r-container);
+  background: var(--surface); padding: 1rem 1.1rem; margin-bottom: .7rem;
+}
+.req-head {
+  display: flex; align-items: baseline; gap: .6rem; flex-wrap: wrap;
+  margin-bottom: .9rem;
+}
+.req-who { font-weight: 510; font-size: .95rem; letter-spacing: -.015em; }
+.req-when { font-family: var(--mono); font-size: .74rem; color: var(--muted); }
+
+/* A list, not a grid of cards. Roles are ordered least to most privileged and
+   read top-down, so a row is the honest shape — a grid implies they are peers
+   and leaves an orphan when the count is odd. */
+.roles { border-top: 1px solid var(--line); }
+.role {
+  display: grid; grid-template-columns: 7rem 1fr auto; gap: .9rem;
+  align-items: baseline; width: 100%; text-align: left;
+  padding: .7rem .1rem; background: none; border: none; border-radius: 0;
+  border-bottom: 1px solid var(--line); font-family: var(--sans);
+}
+.role:hover { background: var(--raised); padding-left: .5rem; padding-right: .5rem; }
+.role .name { font-weight: 510; font-size: .88rem; color: var(--ink); }
+.role .why { font-size: .82rem; color: var(--muted); line-height: 1.45; }
+.role .count {
+  font-family: var(--mono); font-size: .66rem; color: var(--muted);
+  letter-spacing: .05em; text-transform: uppercase; white-space: nowrap;
+}
+@media (max-width: 760px) {
+  .role { grid-template-columns: 1fr; gap: .2rem; }
+  .role .count { display: none; }
+}
+/* No left-border strip: a coloured 3-4px strip down one side is the most
+   recognisable tell of generated UI. Caution is carried by the text that
+   states the risk, which is the thing an approver actually needs to read. */
+.role.caution .warn { color: var(--aws); }
+.role .warn {
+  grid-column: 2 / -1; font-size: .78rem; color: var(--aws); line-height: 1.45;
+  margin-top: .15rem;
+}
+
+details.role-detail { margin-top: .9rem; }
+details.role-detail summary {
+  cursor: pointer; font-family: var(--mono); font-size: .7rem; color: var(--muted);
+}
+details.role-detail summary:hover { color: var(--ink); }
+.grants-you { margin: .5rem 0 0; padding-left: 1.1rem; font-size: .85rem; color: var(--ink-2); }
+.grants-you li { margin-bottom: .2rem; }
+
+.people th:last-child, .people td:last-child { text-align: right; }
+.people td .email { font-family: var(--mono); font-size: .82rem; }
+.rolechips { display: flex; gap: .3rem; flex-wrap: wrap; }
+.seen { font-family: var(--mono); font-size: .74rem; color: var(--muted); }
+.filter { max-width: 18rem; }
+{% endblock %}
+
+{% block content %}
+<h1>People</h1>
+<p class="sub">
+  Everyone starts with no access. Grant the role that matches what someone does —
+  it expands to the surfaces they need and nothing else.
+</p>
+
+<section class="queue">
+  <h2>
+    Waiting for approval
+    {% if pending_users %}<span class="chip pending">{{ pending_users|length }}</span>{% endif %}
+  </h2>
+
+  {% if not pending_users %}
+  <div class="queue-empty">Nobody is waiting. New sign-ins appear here.</div>
+  {% else %}
+    {% for u in pending_users %}
+    <div class="req">
+      <div class="req-head">
+        <span class="req-who">{{ u.name or u.email }}</span>
+        <span class="email muted">{{ u.email }}</span>
+        <span class="spacer"></span>
+        <span class="req-when">first seen {{ u.created_at }}</span>
+      </div>
+
+      <div class="roles">
+        {% for r in roles %}
+        <button class="role {% if r.caution %}caution{% endif %}"
+                type="button"
+                data-user="{{ u.id }}" data-role="{{ r.key }}"
+                data-label="{{ r.label }}" data-email="{{ u.email }}">
+          <span class="name">{{ r.label }}</span>
+          <span class="why">{{ r.summary }}</span>
+          <span class="count">{{ r.surfaces|length }} surface{{ '' if r.surfaces|length == 1 else 's' }}</span>
+          {% if r.caution %}<span class="warn">{{ r.caution }}</span>{% endif %}
+        </button>
+        {% endfor %}
+      </div>
+
+      <details class="role-detail">
+        <summary>What each role can see</summary>
+        {% for r in roles %}
+        <p style="margin:.7rem 0 .1rem"><strong>{{ r.label }}</strong></p>
+        <ul class="grants-you">
+          {% for g in r.grants_you %}<li>{{ g }}</li>{% endfor %}
+        </ul>
+        {% endfor %}
+      </details>
+
+      <div class="row" style="margin-top:.9rem">
+        <button class="ghost danger" type="button"
+                data-disable="{{ u.id }}" data-email="{{ u.email }}">Decline</button>
+      </div>
+    </div>
+    {% endfor %}
+  {% endif %}
+</section>
+
+<h2>Everyone</h2>
+<div class="row" style="margin:.4rem 0 .8rem">
+  <input class="filter" id="filter" type="search" placeholder="Filter by email or role">
+</div>
+
+<div class="panel">
+  <table class="people">
+    <thead>
+      <tr>
+        <th>Person</th><th>Status</th><th>Access</th><th>Last seen</th><th></th>
+      </tr>
+    </thead>
+    <tbody id="people">
+      {% for u in users %}
+      <tr data-search="{{ u.email }} {{ u.grants|join(' ') }}">
+        <td><span class="email">{{ u.email }}</span></td>
+        <td><span class="chip {{ u.status }}">{{ u.status }}</span></td>
+        <td>
+          <div class="rolechips">
+            {% if u.roles %}
+              {% for r in u.roles %}<span class="chip">{{ r }}</span>{% endfor %}
+            {% elif u.grants %}
+              {% for g in u.grants %}<span class="chip">{{ g }}</span>{% endfor %}
+            {% else %}
+              <span class="muted">none</span>
+            {% endif %}
+          </div>
+        </td>
+        <td><span class="seen">{{ u.last_seen_at or '—' }}</span></td>
+        <td>
+          {% if u.status == 'active' %}
+          <button class="ghost danger" type="button"
+                  data-disable="{{ u.id }}" data-email="{{ u.email }}">Disable</button>
+          {% elif u.status == 'disabled' %}
+          <button class="ghost" type="button"
+                  data-enable="{{ u.id }}" data-email="{{ u.email }}">Re-enable</button>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+/* textContent only — user emails and role names are data, never markup. */
+(function () {
+  function post(url, body) {
+    return fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body || {})
+    }).then(function (r) {
+      if (!r.ok) {
+        return r.json().catch(function () { return {}; }).then(function (b) {
+          throw new Error(b.detail || ('HTTP ' + r.status));
+        });
+      }
+      return r.json().catch(function () { return {}; });
+    });
+  }
+
+  function busy(btn, on) {
+    btn.disabled = on;
+    if (on) { btn.dataset.was = btn.textContent; btn.textContent = 'Working…'; }
+    else if (btn.dataset.was) { btn.textContent = btn.dataset.was; }
+  }
+
+  document.querySelectorAll('[data-role]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var email = btn.getAttribute('data-email');
+      var label = btn.getAttribute('data-label');
+      /* Approving is the one action here that widens access, so it is the one
+         that asks. Disable/decline are recoverable; a wrong grant is live. */
+      window.confirmModal({
+        title: 'Grant the ' + label + ' role?',
+        body: email + ' will be able to use everything that role covers, '
+            + 'immediately. You can change it afterwards.',
+        confirmLabel: 'Grant ' + label
+      }).then(function (ok) {
+        if (!ok) { return; }
+        busy(btn, true);
+        post('/admin/users/' + btn.getAttribute('data-user') + '/approve',
+             { role: btn.getAttribute('data-role') })
+          .then(function () { window.location.reload(); })
+          .catch(function (e) {
+            busy(btn, false);
+            window.alertModal({ title: 'Could not grant that role', body: e.message });
+          });
+      });
+    });
+  });
+
+  document.querySelectorAll('[data-disable]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var who = btn.getAttribute('data-email');
+      window.confirmModal({
+        title: 'Remove access for ' + who + '?',
+        body: 'They will be signed out and unable to run anything. '
+            + 'Their account and history are kept, and you can re-enable it later.',
+        confirmLabel: 'Remove access',
+        danger: true
+      }).then(function (ok) {
+        if (!ok) { return; }
+        busy(btn, true);
+        post('/admin/users/' + btn.getAttribute('data-disable') + '/disable')
+          .then(function () { window.location.reload(); })
+          .catch(function (e) {
+            busy(btn, false);
+            window.alertModal({ title: 'Could not remove access', body: e.message });
+          });
+      });
+    });
+  });
+
+  document.querySelectorAll('[data-enable]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      busy(btn, true);
+      post('/admin/users/' + btn.getAttribute('data-enable') + '/enable')
+        .then(function () { window.location.reload(); })
+        .catch(function (e) {
+          busy(btn, false);
+          window.alertModal({ title: 'Could not enable that account', body: e.message });
+        });
+    });
+  });
+
+  var filter = document.getElementById('filter');
+  if (filter) {
+    filter.addEventListener('input', function () {
+      var q = filter.value.toLowerCase();
+      document.querySelectorAll('#people tr').forEach(function (tr) {
+        var hay = (tr.getAttribute('data-search') || '').toLowerCase();
+        tr.style.display = hay.indexOf(q) === -1 ? 'none' : '';
+      });
+    });
+  }
+})();
+</script>
+{% endblock %}

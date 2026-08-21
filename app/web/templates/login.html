@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}infragpt — sign in{% endblock %}
+
+{% block style %}
+.signin { max-width: 26rem; margin: 3.5rem auto 0; }
+.signin h1 { margin-bottom: .4rem; }
+.signin form { margin-top: 1.2rem; }
+.signin label.label { display: block; margin: .9rem 0 .3rem; }
+.signin input { width: 100%; font-size: .88rem; }
+.signin .actions { margin-top: 1.1rem; display: flex; align-items: center; gap: .8rem; }
+.signin .error { color: var(--fail); font-size: .84rem; margin-top: .7rem; }
+.signin .alt { margin-top: 1.8rem; border-top: 1px solid var(--line); padding-top: 1rem; }
+.signin .alt summary { cursor: pointer; font-size: .82rem; color: var(--muted); list-style: none; }
+.signin .alt summary::-webkit-details-marker { display: none; }
+.signin .alt summary::before { content: "+ "; }
+.signin .alt[open] summary::before { content: "\2212 "; }
+.signin .alt summary:hover { color: var(--ink-2); }
+.signin .hint { font-size: .8rem; color: var(--muted); line-height: 1.55; margin-top: .7rem; }
+.signin .hint code { font-size: .78rem; }
+{% endblock %}
+
+{% block content %}
+<div class="signin">
+  <h1>Sign in</h1>
+  <p class="sub">Read-only. Nothing here can change infrastructure.</p>
+
+  <form method="post" action="/auth/login" autocomplete="on">
+    <label class="label" for="email">Work email</label>
+    <input id="email" name="email" type="email" required autofocus
+           value="{{ email or '' }}" spellcheck="false" autocomplete="username">
+
+    <label class="label" for="password">Password</label>
+    <input id="password" name="password" type="password" required
+           autocomplete="current-password">
+
+    {% if error %}<div class="error">{{ error }}</div>{% endif %}
+
+    <div class="actions">
+      <button class="primary" type="submit">Sign in</button>
+      <a href="/auth/register" class="muted" style="font-size:.84rem">Create an account</a>
+    </div>
+  </form>
+
+  <details class="alt">
+    <summary>Sign in with a infractl token instead</summary>
+    <form method="post" action="/auth/login" autocomplete="off">
+      <label class="label" for="token">Token</label>
+      <input id="token" name="token" type="password" placeholder="nyc_…" spellcheck="false">
+      <div class="actions"><button type="submit">Sign in with token</button></div>
+    </form>
+    <p class="hint">
+      Run <code>infractl login</code> to get one. Useful for port-forwards, and for
+      getting in when the SSO route is the thing that is broken. The token is
+      sent as a form POST and kept in an httponly cookie — never in a URL, where
+      it would land in browser history and proxy logs.
+    </p>
+  </details>
+</div>
+{% endblock %}

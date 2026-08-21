@@ -1,0 +1,97 @@
+{% extends "base.html" %}
+{% block title %}infragpt — audit{% endblock %}
+
+{% block style %}
+form.filters { display: flex; gap: .6rem; flex-wrap: wrap; align-items: flex-end; margin-bottom: 1rem; }
+form.filters label { display: flex; flex-direction: column; gap: .2rem; font-size: .8rem; color: var(--muted); }
+td.ts { white-space: nowrap; font-family: var(--mono); font-size: .8rem; }
+td.hash { font-family: var(--mono); font-size: .75rem; color: var(--muted); }
+td details pre { max-height: 12rem; margin: .3rem 0 0; }
+{% endblock %}
+
+{% block content %}
+<h1>Audit</h1>
+<p class="sub">
+  One record per question and per registry call, read from the append-only JSONL on the
+  data volume. Result bodies are never stored — only their SHA-256, so a claimed answer
+  can be matched against the output that produced it.
+</p>
+
+<form class="filters panel" method="get" action="/admin/audit-log">
+  <label>Date
+    <input type="date" name="day" value="{{ filters.day }}">
+  </label>
+  <label>User contains
+    <input type="text" name="user" value="{{ filters.user }}" placeholder="ops@">
+  </label>
+  <label>Function contains
+    <input type="text" name="entry" value="{{ filters.entry }}" placeholder="top_queries">
+  </label>
+  <label>Outcome
+    <select name="outcome">
+      {% for value, text in [('', 'any'), ('ok', 'ok'), ('failed', 'failed')] %}
+      <option value="{{ value }}" {% if filters.outcome == value %}selected{% endif %}>{{ text }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>Kind
+    <select name="kind">
+      {% for value, text in [('', 'any'), ('question', 'question'), ('call', 'call')] %}
+      <option value="{{ value }}" {% if filters.kind == value %}selected{% endif %}>{{ text }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>Limit
+    <input type="number" name="limit" min="1" max="1000" value="{{ filters.limit }}">
+  </label>
+  <button class="primary" type="submit">Filter</button>
+  <a class="btn" href="/admin/audit-log">Reset</a>
+</form>
+
+<div class="panel">
+  <p class="muted">
+    {{ records|length }} record{{ '' if records|length == 1 else 's' }}
+    for {{ filters.day or 'today' }}{% if truncated %} (showing the most recent){% endif %}.
+  </p>
+  <table>
+    <thead>
+      <tr>
+        <th>Time</th><th>User</th><th>Kind</th><th>Function</th>
+        <th>Target</th><th>Cloud</th><th>Outcome</th><th>ms</th><th>Detail</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in records %}
+      <tr>
+        <td class="ts">{{ r.ts }}</td>
+        <td class="mono">{{ r.user_email }}</td>
+        <td>{{ r.kind }}</td>
+        <td class="mono">{{ r.entry_name or (r.entry_names | join(', ')) or '—' }}</td>
+        <td class="mono">{{ r.target or '—' }}</td>
+        <td>{{ r.cloud or '—' }}</td>
+        <td>
+          <span class="badge {{ 'active' if r.ok else 'disabled' }}">{{ 'ok' if r.ok else 'failed' }}</span>
+        </td>
+        <td>{{ r.duration_ms }}</td>
+        <td>
+          <details>
+            <summary>view</summary>
+            {# Everything below is untrusted-ish text from the audit file; Jinja
+               autoescape is the only thing rendering it, and there is no |safe. #}
+            <pre>question: {{ r.question or '—' }}
+params:   {{ r.params }}
+verdict:  {{ r.validation_verdict }}
+error:    {{ r.error or '—' }}
+sha256:   {{ r.output_sha256 or '—' }}
+tokens:   in={{ r.tokens_in }} out={{ r.tokens_out }}
+conv:     {{ r.conversation_id or '—' }}</pre>
+          </details>
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="9" class="muted">No records match these filters.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

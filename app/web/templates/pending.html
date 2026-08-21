@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}infragpt — awaiting approval{% endblock %}
+
+{% block content %}
+{# Two callers, two states: someone who has just registered and is not signed
+   in (no principal), and a signed-in account that is still pending. The page
+   says the same thing either way — it just cannot assume a principal exists. #}
+<h1>{{ heading or ('Account created' if just_registered else 'Awaiting approval') }}</h1>
+
+<div class="notice">
+  <p>
+    {% if message %}{{ message }}
+    {% elif just_registered %}
+      Your account has been created and is <strong>pending approval</strong>. It
+      holds no access yet — an admin has to approve it and choose what it can
+      read. You will not be able to sign in until then.
+    {% else %}
+      Your account is pending approval and holds no access yet.
+    {% endif %}
+  </p>
+</div>
+
+<div class="panel">
+  <h2 style="margin-top:0">Your account</h2>
+  <table>
+    <tr><th>Email</th><td class="mono">{{ (principal.email if principal else email) or '—' }}</td></tr>
+    {% if principal %}
+    <tr><th>Status</th><td><span class="badge {{ principal.user.status }}">{{ principal.user.status }}</span></td></tr>
+    <tr><th>Access</th><td class="mono">{{ principal.surfaces | sort | join(', ') or 'none yet' }}</td></tr>
+    <tr><th>First seen</th><td class="muted">{{ principal.user.created_at }}</td></tr>
+    {% else %}
+    <tr><th>Status</th><td><span class="badge pending">pending</span></td></tr>
+    <tr><th>Access</th><td class="mono">none yet</td></tr>
+    {% endif %}
+  </table>
+</div>
+
+<h2>What happens next</h2>
+<p class="muted">
+  An admin reviews the account and grants a role — Viewer, Support, Engineer,
+  Analyst, Casework, Operator or Admin — matching what you do. Nothing is
+  granted automatically; that is the point of the gate.
+  {% if principal %}Check back here, or run <code>infractl whoami</code>.
+  {% else %}Once approved, <a href="/auth/login">sign in</a>.{% endif %}
+</p>
+{% endblock %}

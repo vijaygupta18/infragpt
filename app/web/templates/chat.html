@@ -1,0 +1,756 @@
+{% extends "base.html" %}
+{% block title %}infragpt — ask{% endblock %}
+
+{% block style %}
+/* ---------------------------------------------------------------------------
+   THE EVIDENCE SPINE
+
+   Each answer is anchored to a vertical hairline with one node per call. The
+   node is a 5px dot coloured by the cloud it ran against; a failed call turns it
+   red. You can read what an answer rests on without expanding anything, which is
+   the difference between a chat toy and something you act on at 3am.
+
+   The dot is the only place cloud colour appears at this size. No fills, no
+   left-border strips, no card grid.
+--------------------------------------------------------------------------- */
+
+.layout {
+  display: grid; grid-template-columns: var(--rail) minmax(0, 1fr);
+  gap: 2.5rem; align-items: start;
+}
+@media (max-width: 900px) {
+  .layout { grid-template-columns: minmax(0, 1fr); gap: 1rem; }
+  .rail { display: none; }
+  .rail.open { display: block; }
+}
+.rail-toggle { display: none; }
+@media (max-width: 900px) { .rail-toggle { display: inline-flex; } }
+
+/* ---- rail ---------------------------------------------------------------- */
+
+.rail { position: sticky; top: 3.6rem; }
+.rail .label { display: block; margin: 1.1rem 0 .4rem; }
+.rail ul { list-style: none; margin: 0; padding: 0; }
+.rail li a {
+  display: block; padding: .34rem .5rem; border-radius: var(--r-control);
+  color: var(--muted); font-size: .82rem; line-height: 1.4;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.rail li { display: flex; align-items: center; }
+.rail li a { flex: 1; min-width: 0; }
+.rail li a:hover { background: var(--raised); color: var(--ink-2); }
+.rail .del {
+  flex: none; opacity: 0; padding: .1rem .3rem; border: none; background: none;
+  color: var(--muted); font-size: .8rem; line-height: 1; border-radius: 4px;
+}
+.rail li:hover .del, .rail .del:focus-visible { opacity: 1; }
+.rail .del:hover { color: var(--fail); background: var(--raised); }
+.rail li.current a { background: var(--raised); color: var(--ink); font-weight: 510; }
+.new-chat { width: 100%; justify-content: center; }
+
+/* ---- thread -------------------------------------------------------------- */
+
+.thread { max-width: var(--col); }
+
+/* A question and the answer under it are ONE exchange, so the rule goes after
+   the answer. Dividing them from each other — which is what a per-message
+   border does — makes a thread read as a list of unrelated fragments. */
+.turn { margin-bottom: .5rem; }
+.turn.is-a { padding-bottom: 2rem; margin-bottom: 2rem; border-bottom: 1px solid var(--line); }
+.turn.is-q { margin-bottom: 1.15rem; }
+.turn:last-child { border-bottom: none; padding-bottom: .5rem; }
+/* The question is set in mono and prefixed, so a long thread reads as a
+   transcript of an exchange rather than as one undifferentiated column of
+   prose. It is the user's own words — the one text on screen that is neither
+   machine output nor model output, and it should look like it. */
+.turn .question {
+  position: relative; padding-left: 1.25rem;
+  font-family: var(--mono); font-size: .92rem; font-weight: 450;
+  letter-spacing: -.008em;
+  line-height: 1.55; margin-bottom: 1.1rem; white-space: pre-wrap; color: var(--ink);
+}
+.turn .question::before {
+  content: "›"; position: absolute; left: .1rem; top: 0;
+  color: var(--muted); font-weight: 500;
+}
+/* The answer is the one thing on the page meant to be READ rather than
+   scanned, so it gets full ink and a comfortable measure. Everything else on
+   screen is instrumentation around it. */
+.answer { color: var(--ink); line-height: 1.72; font-size: 1rem; }
+.answer.err { white-space: pre-wrap; }
+.answer.err { color: var(--fail); }
+
+.answer-tools {
+  display: flex; gap: .3rem; margin-top: .6rem;
+  opacity: 0; transition: opacity .1s ease;
+}
+.turn:hover .answer-tools, .turn:focus-within .answer-tools { opacity: 1; }
+
+/* ---- spine --------------------------------------------------------------- */
+/* THE SIGNATURE ELEMENT.
+
+   A hairline running down the left of the evidence, with one numbered node per
+   call, coloured by the cloud it ran against. It is the only structural device
+   in the interface, and it encodes three real things at a glance: how many
+   calls an answer rests on, which cloud each touched, and whether any failed.
+
+   It sits above the answer. In an incident the order you want is what ran,
+   then what it means — and sources buried under the conclusion are the
+   best-documented anti-pattern in this whole category of interface. */
+
+.spine {
+  margin: 0 0 1.25rem;
+  /* The rule is the spine. At hairline weight on a dark ground it vanished,
+     which left the numbers floating and the whole device unreadable as a
+     structure — it needs enough presence to read as one object. */
+  border-left: 2px solid var(--ok);
+  padding-left: .9rem;
+}
+.spine:has(.spine-head.partial) { border-left-color: var(--aws); }
+.spine:has(.spine-head.none), .spine.no-evidence { border-left-color: var(--fail); }
+/* The verdict is the header, not a count: "4 calls" and "4 calls, 2 failed"
+   are different answers and only one is safe to act on. */
+.spine-head {
+  display: flex; align-items: baseline; gap: .5rem; flex-wrap: wrap;
+  margin-bottom: .55rem;
+  cursor: pointer; list-style: none;
+}
+.spine-head::-webkit-details-marker { display: none; }
+/* A caret, so it reads as openable. Rotates when the details is open. */
+.spine-head::after {
+  content: "›"; margin-left: .1rem; color: var(--muted);
+  font-size: .85rem; line-height: 1; transition: transform .12s ease;
+  display: inline-block;
+}
+details.spine[open] > .spine-head::after { transform: rotate(90deg); }
+details.spine:not([open]) > .spine-head { margin-bottom: 0; }
+.spine-head:hover .spine-verdict { color: var(--ink); }
+.spine-mark {
+  width: 6px; height: 6px; border-radius: 50%; flex: none;
+  background: var(--ok); align-self: center;
+}
+.spine-head.partial .spine-mark { background: var(--aws); }
+.spine-head.none .spine-mark { background: var(--fail); }
+.spine-verdict {
+  font-size: .8rem; font-weight: 510; color: var(--ink-2); letter-spacing: -.008em;
+}
+.spine-head.none .spine-verdict { color: var(--fail); }
+.spine-count {
+  font-family: var(--mono); font-size: .7rem; color: var(--muted);
+}
+.spine.no-evidence { border-left-color: var(--fail); }
+
+.spine-list { list-style: none; margin: 0; padding: 0; }
+
+/* Each node is a numbered row. The number is set in the gutter so the names
+   line up in a column you can scan, which is what makes a six-call answer
+   readable at all. */
+.node {
+  position: relative; padding: .12rem 0 .38rem 1.6rem;
+}
+.node-n {
+  position: absolute; left: 0; top: .12rem;
+  font-family: var(--mono); font-size: .68rem; font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+/* Cloud colour appears on the NAME, not as a fill or a strip. Per the palette
+   rule, chroma means provenance — so the coloured thing is the thing whose
+   provenance you are reading. */
+.node.gcp .node-name { color: var(--gcp); }
+.node.aws .node-name { color: var(--aws); }
+.node.failed .node-name { color: var(--fail); }
+
+.node-head {
+  display: flex; align-items: baseline; gap: .4rem; flex-wrap: wrap;
+  font-family: var(--mono); font-size: .78rem;
+}
+.node-name { font-weight: 510; color: var(--ink); }
+.node-params { color: var(--muted); font-size: .72rem; word-break: break-all; }
+.node-error { color: var(--fail); font-size: .76rem; margin-top: .15rem; }
+.node-note { color: var(--muted); font-family: var(--mono); font-size: .68rem; margin-top: .15rem; }
+
+.node details { margin-top: .25rem; }
+.node summary {
+  cursor: pointer; color: var(--muted); font-family: var(--mono); font-size: .7rem;
+  list-style: none; display: inline-flex; align-items: center; gap: .25rem;
+}
+.node summary::-webkit-details-marker { display: none; }
+.node summary::before { content: "+"; }
+.node details[open] summary::before { content: "\2212"; }
+.node summary:hover { color: var(--ink-2); }
+.node details pre { margin-top: .3rem; }
+
+/* ---- activity bar -------------------------------------------------------- */
+/* A live log of what the tool is doing, collapsed to one line by default and
+   expandable. Waiting 40 seconds at a spinner that says nothing is the
+   difference between "stuck" and "working". */
+
+.activity {
+  border: 1px solid var(--line); border-radius: var(--r-container);
+  background: var(--sunken); margin-bottom: 1rem; overflow: hidden;
+}
+.activity summary {
+  cursor: pointer; list-style: none; padding: .55rem .7rem;
+  display: flex; align-items: center; gap: .5rem;
+  font-family: var(--mono); font-size: .76rem; color: var(--ink-2);
+}
+.activity summary::-webkit-details-marker { display: none; }
+.activity summary::after {
+  content: "+"; margin-left: auto; color: var(--muted); font-size: .8rem;
+}
+.activity[open] summary::after { content: "\2212"; }
+.activity summary:hover { color: var(--ink); }
+.activity .steps {
+  border-top: 1px solid var(--line); padding: .5rem .7rem .6rem;
+  display: flex; flex-direction: column; gap: .3rem;
+}
+.step {
+  display: flex; align-items: baseline; gap: .5rem;
+  font-family: var(--mono); font-size: .73rem; color: var(--muted);
+}
+.step .mark { width: .8rem; flex: none; }
+.step.done .mark { color: var(--ok); }
+.step.failed .mark { color: var(--fail); }
+.step .what { color: var(--ink-2); }
+.step .detail { color: var(--muted); word-break: break-all; }
+.activity .elapsed { font-family: var(--mono); color: var(--muted); }
+
+/* ---- pending ------------------------------------------------------------- */
+
+.pending { display: flex; align-items: center; gap: .5rem; color: var(--muted); font-size: .86rem; }
+.pending .pulse {
+  width: 5px; height: 5px; border-radius: 50%; background: var(--accent);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+@keyframes pulse { 0%,100% { opacity: .2; } 50% { opacity: 1; } }
+.pending .elapsed { font-family: var(--mono); font-size: .74rem; }
+
+/* ---- empty state --------------------------------------------------------- */
+/* A list of real questions, not a grid of cards. These are things the registry
+   can actually answer, so the first click succeeds. */
+
+.empty { padding: 1rem 0 1.5rem; }
+.empty h1 { font-size: 1.45rem; letter-spacing: -.028em; }
+.starters { margin-top: 1.2rem; max-width: 36rem; border-top: 1px solid var(--line); }
+/* A fixed gutter for the surface label, so the questions line up in one
+   column. Ragged starts read as four unrelated buttons; an aligned column
+   reads as a menu of what this thing can answer. */
+.starter {
+  display: grid; grid-template-columns: 5.5rem minmax(0, 1fr);
+  align-items: baseline; gap: .5rem;
+  width: 100%; text-align: left; background: none;
+  border: none; border-bottom: 1px solid var(--line); border-radius: 0;
+  padding: .72rem .1rem; color: var(--ink-2); font-size: .9rem; font-weight: 450;
+}
+.starter:hover { background: none; color: var(--ink); }
+.starter:hover .k { color: var(--ink-2); }
+.starter .k {
+  font-family: var(--mono); font-size: .64rem; letter-spacing: .06em;
+  text-transform: uppercase; color: var(--muted);
+}
+
+/* ---- composer ------------------------------------------------------------ */
+
+.composer-wrap { position: sticky; bottom: 0; padding: .8rem 0 1rem; background: var(--bg); max-width: var(--col); }
+.composer {
+  border: 1px solid var(--line-2); border-radius: var(--r-container);
+  background: var(--surface); padding: .6rem .7rem .45rem;
+  transition: border-color .1s ease;
+}
+.composer:focus-within { border-color: var(--accent); }
+.composer textarea {
+  border: none; padding: 0; background: transparent; min-height: 1.5rem;
+  max-height: 11rem; overflow-y: auto; line-height: 1.55; font-size: .9rem;
+}
+.composer textarea:focus { border: none; }
+.composer-foot { display: flex; align-items: center; gap: .5rem; margin-top: .4rem; }
+.composer-foot .hint { font-size: .72rem; color: var(--muted); }
+@media (max-width: 640px) { .composer-foot .hint { display: none; } }
+.composer-foot .grow { margin-left: auto; }
+{% endblock %}
+
+{% block content %}
+<div class="layout">
+  <aside class="rail" id="rail">
+    <a class="btn new-chat row" href="/">New question</a>
+    <span class="label">Recent</span>
+    <ul>
+      {% for c in conversations %}
+      <li {% if c.id == conversation_id %}class="current"{% endif %}>
+        <a href="/c/{{ c.id }}" title="{{ c.title or 'Untitled' }}">
+          {{ c.title or 'New question' }}
+        </a>
+        <button class="del" type="button" data-delete="{{ c.id }}"
+                title="Delete this conversation" aria-label="Delete conversation">&times;</button>
+      </li>
+      {% else %}
+      <li><span class="muted" style="font-size:.85rem">Nothing yet.</span></li>
+      {% endfor %}
+    </ul>
+  </aside>
+
+  <section class="thread">
+    {% if not messages %}
+    <div class="empty">
+      <h1>What do you want to know?</h1>
+      <p class="sub">
+        Every answer opens with the calls it rests on — what ran, against which
+        cloud, and whether it worked — so you can judge the evidence before you
+        read the conclusion. Nothing here can change infrastructure.
+      </p>
+      <div class="starters">
+        <button class="starter" type="button" data-q="Are any pods not Running in the apps namespace in gcp?">
+          <span class="k">k8s</span>Are any pods not Running in apps on GCP?
+        </button>
+        <button class="starter" type="button" data-q="Are any AlloyDB read pools at their autoscaler ceiling?">
+          <span class="k">capacity</span>Are any AlloyDB read pools at their autoscaler ceiling?
+        </button>
+        <button class="starter" type="button" data-q="Does the key driver:availability:12345 exist in both clouds?">
+          <span class="k">cache</span>Does a key exist in both clouds, or have they diverged?
+        </button>
+        <button class="starter" type="button" data-q="Which tables in the driver database are doing the most sequential scans?">
+          <span class="k">db</span>Which driver tables do the most sequential scans?
+        </button>
+      </div>
+    </div>
+    {% endif %}
+
+    <div id="transcript">
+      {# Autoescape is on: stored assistant text may quote raw log lines, so it
+         is data, never markup. #}
+      {% for m in messages %}
+      {# One .turn per MESSAGE, tagged with its role. The divider belongs at
+         the end of an exchange, not between a question and its own answer. #}
+      <div class="turn {{ 'is-q' if m.role == 'user' else 'is-a' }}">
+        {% if m.role == 'user' %}
+        <div class="question">{{ m.content }}</div>
+        {% else %}
+        {# Evidence first, same as a live answer. The JSON rides in a data
+           attribute and is rendered by the SAME renderSpine the live path
+           uses, so a reloaded conversation cannot drift from the one you
+           watched being answered. Jinja escapes it into the attribute, and the
+           renderer builds nodes with textContent, so a pod log quoted in a
+           param stays inert on both paths. #}
+        {% if m.evidence %}<div data-evidence="{{ m.evidence }}"></div>{% endif %}
+        {# Rendered client-side by renderMarkdown from this element's own
+           textContent. Jinja has already escaped it, and the renderer never
+           uses innerHTML, so stored log excerpts stay inert either way. #}
+        <div class="answer md" data-md>{{ m.content }}</div>
+        {% endif %}
+      </div>
+      {% endfor %}
+    </div>
+
+    <div class="composer-wrap">
+      <form id="composer" class="composer" autocomplete="off">
+        <textarea id="q" rows="1" required maxlength="4000"
+          placeholder="Ask about pods, caches, database capacity…"></textarea>
+        <div class="composer-foot">
+          <button class="ghost rail-toggle" type="button" id="railToggle">Recent</button>
+          <span class="hint">Enter to send · Shift+Enter for a newline · / to focus</span>
+          <span class="grow"></span>
+          <button class="primary" type="submit" id="send">Ask</button>
+        </div>
+      </form>
+    </div>
+  </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+/* Live answers are built with createElement + textContent ONLY.
+   Never innerHTML / insertAdjacentHTML here: tool output contains untrusted pod
+   logs and Redis values, and textContent is escape-by-construction.
+   tests/test_web.py enforces this. */
+(function () {
+  var conversationId = {{ conversation_id|tojson }};
+  var transcript = document.getElementById('transcript');
+  var form = document.getElementById('composer');
+  var input = document.getElementById('q');
+  var send = document.getElementById('send');
+  var empty = document.querySelector('.empty');
+
+  function el(tag, cls, text) {
+    var n = document.createElement(tag);
+    if (cls) { n.className = cls; }
+    if (text !== undefined && text !== null) { n.textContent = String(text); }
+    return n;
+  }
+
+  function autogrow() {
+    input.style.height = 'auto';
+    input.style.height = Math.min(input.scrollHeight, 192) + 'px';
+  }
+  input.addEventListener('input', autogrow);
+
+  /* ---- evidence spine ---------------------------------------------------- */
+
+  function renderNode(call, index) {
+    var cls = 'node';
+    if (!call.ok) { cls += ' failed'; }
+    else if (call.cloud === 'gcp') { cls += ' gcp'; }
+    else if (call.cloud === 'aws') { cls += ' aws'; }
+
+    var li = el('li', cls);
+    /* The index is the node. Numbering the calls makes an answer's evidence
+       countable and referable — "the third call failed" — instead of an
+       undifferentiated list. */
+    li.appendChild(el('span', 'node-n', index === undefined ? '' : (index + 1)));
+
+    var head = el('div', 'node-head');
+    head.appendChild(el('span', 'node-name', call.entry_name));
+    if (call.cloud) { head.appendChild(el('span', 'chip ' + call.cloud, call.cloud)); }
+    else if (call.target) { head.appendChild(el('span', 'chip', call.target)); }
+    if (!call.ok) { head.appendChild(el('span', 'chip fail', 'failed')); }
+    li.appendChild(head);
+
+    var params = call.params || {};
+    if (Object.keys(params).length) {
+      li.appendChild(el('div', 'node-params', JSON.stringify(params)));
+    }
+    if (call.error) { li.appendChild(el('div', 'node-error', call.error)); }
+
+    /* Stored evidence keeps no output — only its size — so on a reloaded
+       conversation there is nothing to expand. Show the size instead of an
+       expander that opens onto "(no output)", which reads as a call that
+       returned nothing rather than as one whose output was not kept. */
+    if (call.output === undefined || call.output === null) {
+      if (call.output_chars) {
+        li.appendChild(el('div', 'node-note',
+          call.output_chars.toLocaleString() + ' chars returned · not retained'));
+      }
+    } else {
+      var details = el('details');
+      details.appendChild(el('summary', null, 'output'));
+      details.appendChild(el('pre', null, call.output || '(no output)'));
+      li.appendChild(details);
+    }
+    return li;
+  }
+
+  /* THE EVIDENCE SPINE — the one element this interface is built around.
+
+     It sits ABOVE the answer, not below it. Every citation guide says the same
+     thing about burying sources at the bottom, and it is worse here than in a
+     research tool: the answer is about production, and the first question any
+     engineer asks of it is "what did it actually check?". Reading order should
+     be what ran, then what it means.
+
+     The header states an evidence VERDICT rather than a count, because "4
+     calls" and "4 calls, 2 of which failed" are different answers and only one
+     of them should be acted on. */
+  function renderSpine(calls) {
+    /* A <details>, collapsed by default. The VERDICT and the call count stay
+       visible in the summary, so provenance is still the first thing read —
+       what collapses is the per-call detail, which is reference material you
+       open when you want to check the work, not something to scroll past on
+       every answer. */
+    var wrap = el('details', 'spine');
+    var failed = calls.filter(function (c) { return !c.ok; }).length;
+    var state = failed === calls.length ? 'none' : (failed ? 'partial' : 'ok');
+    /* Anything less than fully verified opens by itself: a failed call changes
+       how the answer should be read, so it must not be hidden behind a click. */
+    if (state !== 'ok') { wrap.open = true; }
+
+    var head = el('summary', 'spine-head ' + state);
+    head.appendChild(el('span', 'spine-mark'));
+    head.appendChild(el('span', 'spine-verdict',
+      state === 'ok' ? 'Verified against live infrastructure'
+      : state === 'partial' ? 'Partly verified — some calls failed'
+      : 'Not verified — every call failed'));
+    head.appendChild(el('span', 'spine-count', calls.length +
+      (calls.length === 1 ? ' call' : ' calls') +
+      (failed ? ' · ' + failed + ' failed' : '')));
+    wrap.appendChild(head);
+
+    var list = el('ul', 'spine-list');
+    calls.forEach(function (c, i) { list.appendChild(renderNode(c, i)); });
+    wrap.appendChild(list);
+    return wrap;
+  }
+
+  /* An answer with no calls behind it. Given a visible, unmissable treatment
+     on purpose: the system prompt forbids answering from model knowledge, so
+     zero calls means either the question was out of scope or something went
+     wrong — and either way it must not look like an ordinary answer. Styling
+     it the same as a verified one is how an unsupported claim gets acted on. */
+  function renderNoEvidence() {
+    var wrap = el('div', 'spine no-evidence');
+    var head = el('div', 'spine-head none');
+    head.appendChild(el('span', 'spine-mark'));
+    head.appendChild(el('span', 'spine-verdict', 'No evidence'));
+    head.appendChild(el('span', 'spine-count',
+      'nothing was run — not backed by live data'));
+    wrap.appendChild(head);
+    return wrap;
+  }
+
+  function copyButton(getText) {
+    var b = el('button', 'ghost', 'Copy');
+    b.type = 'button';
+    b.addEventListener('click', function () {
+      navigator.clipboard.writeText(getText()).then(function () {
+        b.textContent = 'Copied';
+        setTimeout(function () { b.textContent = 'Copy'; }, 1400);
+      });
+    });
+    return b;
+  }
+
+  function renderTurn(question, data, errorText) {
+    var turn = el('div', 'turn');
+    turn.appendChild(el('div', 'question', question));
+
+    if (errorText) {
+      turn.appendChild(el('div', 'answer err', errorText));
+      transcript.appendChild(turn);
+      return;
+    }
+
+    var calls = data.calls || [];
+    turn.appendChild(calls.length ? renderSpine(calls) : renderNoEvidence());
+
+    var answer = el('div', 'answer md');
+    window.renderMarkdown(data.answer, answer);
+    turn.appendChild(answer);
+
+    var tools = el('div', 'answer-tools');
+    tools.appendChild(copyButton(function () { return data.answer; }));
+    turn.appendChild(tools);
+
+    transcript.appendChild(turn);
+  }
+
+  /* ---- stored evidence --------------------------------------------------- */
+  /* Replace each placeholder with a real spine. Answers written before evidence
+     was stored have no attribute at all and simply render without one — absent
+     is honestly different from empty, and neither is claimed to be verified. */
+
+  Array.prototype.forEach.call(
+    document.querySelectorAll('[data-evidence]'),
+    function (node) {
+      var calls;
+      try { calls = JSON.parse(node.getAttribute('data-evidence')); }
+      catch (e) { calls = null; }
+      if (!calls) { node.remove(); return; }
+      node.parentNode.replaceChild(
+        calls.length ? renderSpine(calls) : renderNoEvidence(), node);
+    }
+  );
+
+  /* ---- submit ------------------------------------------------------------ */
+
+  /* ---- activity bar ------------------------------------------------------
+     Streams progress from /ask/stream. Same facts the evidence spine shows
+     afterwards — which function, which cloud, did it succeed — reported as they
+     happen instead of after a silent wait. */
+
+  function makeActivity() {
+    var box = el('details', 'activity');
+    box.open = true;
+    var sum = el('summary');
+    var pulse = el('span', 'pulse');
+    var label = el('span', null, 'Working');
+    var elapsed = el('span', 'elapsed', '0s');
+    sum.appendChild(pulse); sum.appendChild(label); sum.appendChild(elapsed);
+    box.appendChild(sum);
+    var steps = el('div', 'steps');
+    box.appendChild(steps);
+
+    var t0 = Date.now();
+    var ticker = setInterval(function () {
+      elapsed.textContent = Math.round((Date.now() - t0) / 1000) + 's';
+    }, 500);
+
+    return {
+      node: box,
+      step: function (what, detail, state) {
+        var row = el('div', 'step' + (state ? ' ' + state : ''));
+        row.appendChild(el('span', 'mark',
+          state === 'done' ? '\u2713' : state === 'failed' ? '\u00d7' : '\u203a'));
+        row.appendChild(el('span', 'what', what));
+        if (detail) { row.appendChild(el('span', 'detail', detail)); }
+        steps.appendChild(row);
+        return row;
+      },
+      finish: function (text) {
+        clearInterval(ticker);
+        pulse.remove();
+        label.textContent = text;
+        box.open = false;   /* collapse once the answer is there */
+      }
+    };
+  }
+
+  form.addEventListener('submit', function (e) {
+    e.preventDefault();
+    var question = input.value.trim();
+    if (!question) { return; }
+    input.value = '';
+    autogrow();
+    send.disabled = true;
+    if (empty) { empty.remove(); empty = null; }
+
+    var turn = el('div', 'turn');
+    turn.appendChild(el('div', 'question', question));
+    var activity = makeActivity();
+    turn.appendChild(activity.node);
+    transcript.appendChild(turn);
+    turn.scrollIntoView({ block: 'end' });
+
+    var STAGE_TEXT = {
+      selecting: 'Choosing functions',
+      running: 'Running',
+      synthesizing: 'Writing the answer'
+    };
+    var openStage = null;
+    var callCount = 0;
+
+    function handle(ev) {
+      if (ev.type === 'stage') {
+        if (openStage) { openStage.classList.add('done'); openStage.firstChild.textContent = '\u2713'; }
+        openStage = activity.step(STAGE_TEXT[ev.stage] || ev.stage, ev.detail || '');
+      } else if (ev.type === 'call') {
+        callCount++;
+        var where = ev.cloud ? ' \u00b7 ' + ev.cloud : '';
+        activity.step(ev.entry_name + where,
+                      ev.ok ? '' : (ev.error || 'failed'),
+                      ev.ok ? 'done' : 'failed');
+      } else if (ev.type === 'answer') {
+        if (openStage) { openStage.classList.add('done'); openStage.firstChild.textContent = '\u2713'; }
+        activity.finish(callCount + (callCount === 1 ? ' call' : ' calls'));
+        if (ev.conversation_id && !conversationId) {
+          conversationId = ev.conversation_id;
+          window.history.replaceState({}, '', '/c/' + conversationId);
+        }
+        /* Same order as renderTurn: spine first, then the answer. The two
+           paths render the same turn and must not drift — a streamed answer
+           that reads differently from the same answer on reload is two
+           interfaces wearing one name. */
+        var calls = ev.calls || [];
+        turn.appendChild(calls.length ? renderSpine(calls) : renderNoEvidence());
+        var answer = el('div', 'answer md');
+        window.renderMarkdown(ev.answer, answer);
+        turn.appendChild(answer);
+        var tools = el('div', 'answer-tools');
+        tools.appendChild(copyButton(function () { return ev.answer; }));
+        turn.appendChild(tools);
+      } else if (ev.type === 'error') {
+        activity.finish('failed');
+        turn.appendChild(el('div', 'answer err', ev.detail));
+      }
+    }
+
+    fetch('/ask/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: question, conversation_id: conversationId })
+    }).then(function (r) {
+      if (!r.ok || !r.body) {
+        return r.json().catch(function () { return {}; }).then(function (b) {
+          handle({ type: 'error', detail: (b && b.detail) || ('HTTP ' + r.status) });
+        });
+      }
+      var reader = r.body.getReader();
+      var decoder = new TextDecoder();
+      var buf = '';
+      return (function pump() {
+        return reader.read().then(function (res) {
+          if (res.done) { return; }
+          buf += decoder.decode(res.value, { stream: true });
+          var parts = buf.split('\n\n');
+          buf = parts.pop();
+          parts.forEach(function (chunk) {
+            var line = chunk.replace(/^data: /, '').trim();
+            if (!line) { return; }
+            try { handle(JSON.parse(line)); } catch (err) { /* partial frame */ }
+          });
+          return pump();
+        });
+      })();
+    }).catch(function (err) {
+      handle({ type: 'error', detail: 'Request failed: ' + err });
+    }).then(function () {
+      send.disabled = false;
+      input.focus();
+      window.scrollTo({ top: document.body.scrollHeight });
+    });
+  });
+
+  /* ---- keyboard ---------------------------------------------------------- */
+
+  input.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      form.requestSubmit();
+    }
+    if (e.key === 'Escape') { input.blur(); }
+  });
+
+  document.addEventListener('keydown', function (e) {
+    var typing = /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName);
+    if (e.key === '/' && !typing) { e.preventDefault(); input.focus(); }
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+      e.preventDefault(); window.location.href = '/';
+    }
+  });
+
+  document.querySelectorAll('.starter').forEach(function (b) {
+    b.addEventListener('click', function () {
+      input.value = b.getAttribute('data-q');
+      autogrow();
+      form.requestSubmit();
+    });
+  });
+
+  /* ---- delete a conversation --------------------------------------------- */
+  document.querySelectorAll('[data-delete]').forEach(function (btn) {
+    btn.addEventListener('click', function (e) {
+      e.preventDefault();
+      var id = btn.getAttribute('data-delete');
+      var name = btn.parentNode.querySelector('a');
+      window.confirmModal({
+        title: 'Delete this conversation?',
+        body: (name ? '"' + name.textContent.trim() + '" ' : 'This conversation ')
+            + 'will be removed from your history and cannot be recovered. '
+            + 'The audit record of what was queried is kept either way.',
+        confirmLabel: 'Delete',
+        danger: true
+      }).then(function (ok) {
+        if (!ok) { return; }
+        fetch('/conversations/' + id, { method: 'DELETE' }).then(function (r) {
+          if (!r.ok) {
+            window.alertModal({
+              title: 'Could not delete that conversation',
+              body: 'The server refused the request. It is still in your history.'
+            });
+            return;
+          }
+          if (String(id) === String(conversationId)) { window.location.href = '/'; }
+          else { btn.parentNode.remove(); }
+        });
+      });
+    });
+  });
+
+  var railToggle = document.getElementById('railToggle');
+  if (railToggle) {
+    railToggle.addEventListener('click', function () {
+      document.getElementById('rail').classList.toggle('open');
+    });
+  }
+
+  /* Server-rendered history arrives as escaped text; upgrade it in place. */
+  document.querySelectorAll('[data-md]').forEach(function (node) {
+    var raw = node.textContent;
+    node.textContent = '';
+    window.renderMarkdown(raw, node);
+    node.removeAttribute('data-md');
+  });
+
+  autogrow();
+  input.focus();
+})();
+</script>
+{% endblock %}

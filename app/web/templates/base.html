@@ -1,0 +1,670 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}infragpt{% endblock %}</title>
+{# Styles inlined; fonts served same-origin from /static. No CDN anywhere. #}
+<style>
+/* ---------------------------------------------------------------------------
+   DESIGN NOTES
+
+   Two rules, and everything else follows.
+
+   1. STRUCTURE IS GEOMETRY, NOT DECORATION.
+      Depth comes from background luminance steps and hairline borders, never
+      from shadows, gradients or blur. On a dark canvas a shadow is invisible
+      anyway, so the honest tool is a 1px line at ~6% white.
+
+   2. COLOUR IS INFORMATION.
+      One interaction accent, used for focus and a single primary action. The
+      only other colour is cloud provenance — GCP and AWS — and it appears as a
+      6px dot and a word, never as a fill or a border strip. The platform's clouds
+      are never replicated, so "which cloud?" is the question behind most
+      incidents; making it the only other colour means it cannot be missed.
+
+   Explicitly avoided, because they are the fingerprint of generated UI: the
+   coloured 3–4px left-border strip, glassmorphism/backdrop blur, indigo-purple
+   gradients, soft shadows, emoji as iconography, and a row of three identical
+   rounded cards. Radii are 6px and 12px — two values, not six. Weights top out
+   at 560; nothing is bold, because on a dark canvas weight reads as noise and
+   tracking does the work instead.
+--------------------------------------------------------------------------- */
+/* Self-hosted, same-origin. Geist is Vercel's typeface, SIL OFL 1.1, drawn for
+   dense developer dashboards — which is exactly what this is. No CDN: a tool
+   used during an incident must not depend on a third party being reachable. */
+@font-face {
+  font-family: "Geist";
+  src: url("/static/fonts/GeistVariable.woff2") format("woff2");
+  font-weight: 100 900; font-display: swap; font-style: normal;
+}
+@font-face {
+  font-family: "Geist Mono";
+  src: url("/static/fonts/GeistMonoVariable.woff2") format("woff2");
+  font-weight: 100 900; font-display: swap; font-style: normal;
+}
+
+:root {
+  color-scheme: light dark;
+
+  /* Colour is defined in OKLCH: equal numeric steps are equal PERCEIVED steps,
+     so the elevation ladder below is even by construction rather than by eye.
+
+     THE PALETTE RULE, which the whole interface obeys:
+     CHROMA IS RESERVED FOR PROVENANCE. The greys are warm but almost
+     colourless, the accent is ink rather than a hue, and the only saturated
+     marks on screen say which cloud a fact came from or whether a call
+     succeeded. So colour here is never decoration — where you see it, it is
+     carrying information you need. Answering for the wrong cloud is this
+     system's classic failure, so cloud identity is what earns the colour.
+
+     The greys sit on a warm hue (~85) rather than the blue-grey every
+     developer tool defaults to. It reads as paper under lamplight instead of
+     as a screenshot of a screenshot. */
+  --bg:      oklch(98.4% .004 85);
+  --surface: oklch(100% 0 0);
+  --raised:  oklch(96.4% .005 85);
+  --sunken:  oklch(94.8% .006 85);
+
+  /* Text stops short of pure black for the same reason surfaces stop short of
+     pure white: maximum contrast is not maximum legibility. */
+  --ink:   oklch(23% .010 75);
+  --ink-2: oklch(43% .010 75);
+  --muted: oklch(58% .009 75);
+
+  --line:   oklch(23% .010 75 / .11);
+  --line-2: oklch(23% .010 75 / .18);
+
+  /* Ink, not a hue — see the palette rule. A violet primary button would be
+     the fourth saturated thing on screen competing with the three that mean
+     something. */
+  --accent:     oklch(27% .012 75);
+  --accent-ink: oklch(100% 0 0);
+
+  /* Provenance and status — the ONLY colour in the system. */
+  --gcp:  oklch(50% .15 250);
+  --aws:  oklch(54% .14 62);
+  --ok:   oklch(51% .13 156);
+  --fail: oklch(53% .19 25);
+
+  --mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --sans: "Geist", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+
+  /* Two radii, and they mean different things: a control is 6px, a container
+     is 10px. A third value would be a decision nobody could restate. */
+  --r-control: 6px;
+  --r-container: 10px;
+  --rail: 14.5rem;
+  --col: 48rem;
+}
+/* Theme is three-state: an explicit choice stamps data-theme on <html>; with no
+   choice we follow the OS. Both blocks below define the same tokens so a toggle
+   wins in either direction, and neither colour is defined ONLY inside a media
+   query — a token that exists in one branch only is how half a theme goes
+   missing. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    /* Not pure black. White text on #000 produces halation — an optical
+       vibration that makes dense text physically tiring — and it also flattens
+       the luminance steps that carry elevation here. Warm near-black, matching
+       the light theme's hue, with the ladder evenly spaced in perceptual
+       lightness. */
+    --bg:      oklch(16.5% .006 70);
+    --surface: oklch(19.5% .007 70);
+    --raised:  oklch(23% .008 70);
+    --sunken:  oklch(14% .005 70);
+
+    /* Off-white, not #fff: pure white on a dark ground haloes. */
+    --ink:   oklch(94% .003 80);
+    --ink-2: oklch(77% .006 75);
+    --muted: oklch(61% .008 75);
+
+    --line:   oklch(100% 0 0 / .08);
+    --line-2: oklch(100% 0 0 / .15);
+
+    --accent:     oklch(94% .004 80);
+    --accent-ink: oklch(16.5% .006 70);
+
+    --gcp:  oklch(76% .13 248);
+    --aws:  oklch(79% .13 68);
+    --ok:   oklch(76% .14 158);
+    --fail: oklch(71% .17 22);
+  }
+}
+
+:root[data-theme="dark"] {
+    /* Not pure black. White text on #000 produces halation — an optical
+       vibration that makes dense text physically tiring — and it also flattens
+       the luminance steps that carry elevation here. Warm near-black, matching
+       the light theme's hue, with the ladder evenly spaced in perceptual
+       lightness. */
+    --bg:      oklch(16.5% .006 70);
+    --surface: oklch(19.5% .007 70);
+    --raised:  oklch(23% .008 70);
+    --sunken:  oklch(14% .005 70);
+
+    /* Off-white, not #fff: pure white on a dark ground haloes. */
+    --ink:   oklch(94% .003 80);
+    --ink-2: oklch(77% .006 75);
+    --muted: oklch(61% .008 75);
+
+    --line:   oklch(100% 0 0 / .08);
+    --line-2: oklch(100% 0 0 / .15);
+
+    --accent:     oklch(94% .004 80);
+    --accent-ink: oklch(16.5% .006 70);
+
+    --gcp:  oklch(76% .13 248);
+    --aws:  oklch(79% .13 68);
+    --ok:   oklch(76% .14 158);
+    --fail: oklch(71% .17 22);
+  }
+
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  /* 15px, not 14.5. This interface is read during incidents, often on a
+     laptop in bad light, and the previous scale was uniformly small enough
+     that chrome and content had the same visual weight — everything at .82rem
+     is a hierarchy with one level. Body goes up, chrome goes down, and the
+     gap between them is what makes the page scannable. */
+  font: 400 15px/1.65 var(--sans);
+  letter-spacing: -.011em;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+a { color: inherit; text-decoration: none; }
+a:hover { color: var(--ink); }
+
+:focus-visible {
+  outline: 1.5px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+/* ---- shell --------------------------------------------------------------- */
+
+.shell { display: flex; flex-direction: column; min-height: 100%; }
+
+/* Chrome recedes. It is set smaller and quieter than the content it frames,
+   because in a thread the only things worth looking at are the question, the
+   evidence and the answer. */
+header.top {
+  position: sticky; top: 0; z-index: 20;
+  display: flex; align-items: center; gap: .6rem;
+  padding: 0 1.1rem; height: 44px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--line);
+}
+.brand {
+  font-family: var(--mono); font-weight: 560; font-size: .82rem;
+  letter-spacing: -.01em; color: var(--ink);
+}
+/* The brand carried a green status dot immediately to the left of a chip
+   reading "read only". Two marks, one claim — the chip says it in words, so
+   the dot is decoration and decoration is what the palette rule forbids. */
+header.top nav { display: flex; gap: .1rem; margin-left: .4rem; }
+/* Underline, not a filled pill: a filled nav item reads as a primary button,
+   and there is already one of those on the page. */
+header.top nav a {
+  font-size: .8rem; color: var(--muted); padding: .3rem .1rem; margin: 0 .35rem;
+  font-weight: 450; border-bottom: 1.5px solid transparent;
+}
+header.top nav a:hover { color: var(--ink-2); }
+header.top nav a.active { color: var(--ink); border-bottom-color: var(--ink); }
+.spacer { margin-left: auto; }
+.who { font-family: var(--mono); font-size: .74rem; color: var(--muted); }
+.theme-toggle {
+  padding: .2rem .4rem; font-family: var(--mono); font-size: .66rem;
+  letter-spacing: .04em; text-transform: lowercase; color: var(--muted);
+}
+
+/* ---- rendered answers ---------------------------------------------------- */
+/* The model replies in markdown. These style the elements the renderer builds;
+   it emits real nodes via createElement/textContent and never innerHTML, so
+   markup inside a pod log stays inert text. */
+
+.md > *:first-child { margin-top: 0; }
+.md > *:last-child { margin-bottom: 0; }
+.md p { margin: 0 0 .75rem; }
+.md h1, .md h2, .md h3 {
+  font-size: .92rem; font-weight: 560; letter-spacing: -.015em;
+  margin: 1.2rem 0 .5rem; color: var(--ink);
+}
+.md ul, .md ol { margin: 0 0 .75rem; padding-left: 1.2rem; }
+.md li { margin-bottom: .25rem; }
+.md strong { font-weight: 560; color: var(--ink); }
+.md em { font-style: italic; }
+.md code {
+  background: var(--sunken); border: 1px solid var(--line);
+  border-radius: 4px; padding: .05rem .28rem; font-size: .82em; color: var(--ink);
+}
+.md pre { margin: 0 0 .75rem; }
+.md pre code { background: none; border: none; padding: 0; }
+.md table {
+  margin: 0 0 .85rem; font-size: .82rem; border: 1px solid var(--line);
+  border-radius: var(--r-control); border-collapse: separate; border-spacing: 0;
+  overflow: hidden; display: block; overflow-x: auto; white-space: nowrap;
+}
+.md thead th {
+  background: var(--sunken); font-family: var(--mono); font-size: .66rem;
+  position: sticky; top: 0;
+}
+.md td { font-variant-numeric: tabular-nums; }
+.md td:not(:first-child), .md th:not(:first-child) { border-left: 1px solid var(--line); }
+.md hr { border: none; border-top: 1px solid var(--line); margin: 1rem 0; }
+@media (max-width: 640px) { .who { display: none; } }
+
+/* ---- chips --------------------------------------------------------------- */
+/* A chip is a hairline box with a word in it. Colour, where present, is on the
+   text — never a fill, which would turn a label into a badge and a badge into
+   decoration. */
+
+.chip, .badge {
+  display: inline-flex; align-items: center; gap: .3rem;
+  font-family: var(--mono); font-size: .68rem; font-weight: 510;
+  letter-spacing: 0; padding: .1rem .38rem; border-radius: 4px;
+  border: 1px solid var(--line-2); color: var(--muted);
+  white-space: nowrap; line-height: 1.5;
+}
+/* "read only" is the one standing claim this product makes about itself, so it
+   keeps the affirmative colour wherever it appears. */
+.chip.ro, .chip.active, .badge.ro, .badge.active { color: var(--ok); }
+.chip.pending, .badge.pending { color: var(--aws); }
+.chip.disabled, .chip.fail, .badge.disabled { color: var(--fail); }
+.chip.gcp { color: var(--gcp); }
+.chip.aws { color: var(--aws); }
+
+/* ---- content ------------------------------------------------------------- */
+
+main { flex: 1; padding: 1.6rem 1.1rem 2.5rem; max-width: 76rem; margin: 0 auto; width: 100%; }
+
+h1 {
+  font-size: 1.18rem; font-weight: 560; letter-spacing: -.022em;
+  margin: 0 0 .3rem;
+}
+h2 {
+  font-size: .95rem; font-weight: 510; letter-spacing: -.018em;
+  margin: 1.8rem 0 .6rem;
+}
+p.sub { color: var(--muted); margin: 0 0 1.4rem; max-width: 44rem; font-size: .88rem; }
+
+.label {
+  font-family: var(--mono); font-size: .67rem; font-weight: 510;
+  letter-spacing: .06em; text-transform: uppercase; color: var(--muted);
+}
+
+.panel {
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--r-container); padding: 1rem;
+}
+
+button, .btn {
+  font: 480 .82rem var(--sans); letter-spacing: -.008em;
+  padding: .38rem .7rem; border-radius: var(--r-control);
+  border: 1px solid var(--line-2); background: var(--surface);
+  color: var(--ink); cursor: pointer;
+  transition: background .1s ease, border-color .1s ease;
+}
+button:hover:not(:disabled) { background: var(--raised); }
+button.primary {
+  background: var(--accent); color: var(--accent-ink); border-color: transparent;
+  font-weight: 510;
+}
+button.primary:hover:not(:disabled) { background: var(--accent); filter: brightness(1.1); }
+button:disabled { opacity: .45; cursor: not-allowed; }
+button.danger { color: var(--fail); }
+button.danger:hover:not(:disabled) { border-color: var(--fail); background: var(--surface); }
+button.ghost { border-color: transparent; background: transparent; color: var(--muted); }
+button.ghost:hover:not(:disabled) { background: var(--raised); color: var(--ink); }
+
+input, select, textarea {
+  font: 450 .88rem var(--sans); letter-spacing: -.011em;
+  padding: .4rem .55rem; border-radius: var(--r-control);
+  border: 1px solid var(--line-2); background: var(--surface); color: var(--ink);
+}
+textarea { width: 100%; resize: none; }
+input::placeholder, textarea::placeholder { color: var(--muted); }
+input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
+
+table { width: 100%; border-collapse: collapse; font-size: .84rem; }
+th, td { text-align: left; padding: .5rem .55rem; border-bottom: 1px solid var(--line); }
+th {
+  color: var(--muted); font-weight: 510; font-size: .67rem;
+  letter-spacing: .06em; text-transform: uppercase; font-family: var(--mono);
+}
+tbody tr:hover { background: var(--raised); }
+tr:last-child td { border-bottom: none; }
+
+code, pre, .mono { font-family: var(--mono); font-size: .82em; letter-spacing: 0; }
+pre {
+  background: var(--sunken); border: 1px solid var(--line);
+  border-radius: var(--r-control);
+  padding: .65rem .75rem; overflow-x: auto; white-space: pre-wrap;
+  word-break: break-word; max-height: 22rem; margin: 0; color: var(--ink-2);
+  font-size: .76rem; line-height: 1.55;
+}
+.muted { color: var(--muted); }
+.err { color: var(--fail); }
+.row { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
+
+/* A note is a sunken block, not a strip of colour down one side. */
+.notice {
+  background: var(--sunken); border: 1px solid var(--line);
+  border-radius: var(--r-container); padding: .8rem .9rem; margin: 1rem 0;
+  font-size: .86rem; color: var(--ink-2);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .001ms !important;
+    transition-duration: .001ms !important;
+  }
+}
+
+/* ---- modal ---------------------------------------------------------------
+   Built on <dialog> + showModal(), not a div. That gives focus trapping, an
+   inert background, Esc-to-close and the ::backdrop pseudo-element from the
+   platform — all things a hand-rolled overlay gets subtly wrong, usually for
+   keyboard and screen-reader users who are least able to work around it. */
+
+dialog.modal {
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-container);
+  background: var(--surface);
+  color: var(--ink);
+  padding: 0;
+  width: min(28rem, calc(100vw - 2rem));
+  box-shadow: 0 12px 32px -12px oklch(0% 0 0 / .28);
+}
+dialog.modal::backdrop {
+  background: oklch(0% 0 0 / .38);
+}
+dialog.modal .modal-body { padding: 1.15rem 1.15rem .9rem; }
+dialog.modal h2 {
+  margin: 0 0 .45rem; font-size: 1rem; font-weight: 560; letter-spacing: -.018em;
+}
+dialog.modal p {
+  margin: 0; color: var(--ink-2); font-size: .9rem; line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+dialog.modal .modal-actions {
+  display: flex; justify-content: flex-end; gap: .5rem;
+  padding: .8rem 1.15rem 1rem;
+}
+dialog.modal button.danger {
+  background: var(--fail); border-color: transparent; color: oklch(100% 0 0);
+  font-weight: 510;
+}
+dialog.modal button.danger:hover:not(:disabled) { background: var(--fail); filter: brightness(1.08); }
+
+/* Entrance is small and fast. A modal that animates slowly reads as sluggish
+   precisely when someone is trying to confirm something and move on. */
+@media (prefers-reduced-motion: no-preference) {
+  dialog.modal[open] { animation: modal-in .12s ease-out; }
+  @keyframes modal-in {
+    from { opacity: 0; transform: translateY(-4px); }
+    to   { opacity: 1; transform: none; }
+  }
+}
+
+{% block style %}{% endblock %}
+</style>
+</head>
+<body>
+<div class="shell">
+<header class="top">
+  <span class="brand">infragpt</span>
+  <span class="chip ro" title="No write path exists. Every function is read-only.">read only</span>
+  {% if principal %}
+  <nav>
+    <a href="/" {% if path == '/' or path.startswith('/c/') %}class="active"{% endif %}>Ask</a>
+    {% if is_admin %}
+    <a href="/admin" {% if path == '/admin' %}class="active"{% endif %}>People</a>
+    <a href="/admin/audit-log" {% if path == '/admin/audit-log' %}class="active"{% endif %}>Audit</a>
+    {% endif %}
+  </nav>
+  <span class="spacer"></span>
+  <button id="theme" class="ghost theme-toggle" type="button"
+          title="Switch theme" aria-label="Switch theme">
+    <span class="theme-label"></span>
+  </button>
+  <span class="who">{{ principal.email }}</span>
+  <span class="chip {{ principal.user.status }}">{{ principal.user.status }}</span>
+  {% endif %}
+</header>
+<main>
+{% block content %}{% endblock %}
+</main>
+</div>
+<script>
+/* ---------------------------------------------------------------------------
+   Theme. Three states: explicit light, explicit dark, or follow the OS. Applied
+   before paint (this runs in <head> order at the end of body but the class is
+   set synchronously) to avoid a flash of the wrong theme.
+--------------------------------------------------------------------------- */
+(function () {
+  var KEY = 'infragpt-theme';
+  var root = document.documentElement;
+
+  function apply(mode) {
+    if (mode === 'system') { root.removeAttribute('data-theme'); }
+    else { root.setAttribute('data-theme', mode); }
+    var label = document.querySelector('.theme-label');
+    if (label) { label.textContent = mode === 'system' ? 'auto' : mode; }
+  }
+
+  var stored = null;
+  try { stored = localStorage.getItem(KEY); } catch (e) { stored = null; }
+  apply(stored || 'system');
+
+  var btn = document.getElementById('theme');
+  if (btn) {
+    btn.addEventListener('click', function () {
+      /* Cycle rather than flip: "follow the OS" is a real preference and a
+         two-state toggle makes it unreachable once you have touched it. */
+      var order = ['system', 'light', 'dark'];
+      var current = root.getAttribute('data-theme') || 'system';
+      var next = order[(order.indexOf(current) + 1) % order.length];
+      apply(next);
+      try { localStorage.setItem(KEY, next); } catch (e) { /* private mode */ }
+    });
+  }
+})();
+
+/* ---------------------------------------------------------------------------
+   Markdown renderer.
+
+   The model replies in markdown — headings, tables, bold, code fences. Rendering
+   it as plain text makes an answer noticeably harder to read mid-incident.
+
+   SECURITY: this builds DOM with createElement + textContent and NEVER assigns
+   innerHTML. That is not a stylistic preference — answers quote pod logs and
+   Redis values, so any HTML in the source must remain inert text. Because every
+   leaf is set via textContent, a `<script>` in a log line is displayed, not run.
+   Links are deliberately not parsed at all: a markdown link is the one construct
+   that would let untrusted text choose a destination.
+--------------------------------------------------------------------------- */
+window.renderMarkdown = (function () {
+  function el(tag, text) {
+    var n = document.createElement(tag);
+    if (text !== undefined && text !== null) { n.textContent = String(text); }
+    return n;
+  }
+
+  /* Inline: **bold**, *italic*, `code`. Everything else is literal. */
+  function inline(target, text) {
+    var re = /(\*\*[^*]+\*\*|`[^`]+`|\*[^*\n]+\*)/g;
+    var last = 0, m;
+    while ((m = re.exec(text)) !== null) {
+      if (m.index > last) { target.appendChild(document.createTextNode(text.slice(last, m.index))); }
+      var tok = m[0];
+      if (tok.slice(0, 2) === '**') { target.appendChild(el('strong', tok.slice(2, -2))); }
+      else if (tok[0] === '`') { target.appendChild(el('code', tok.slice(1, -1))); }
+      else { target.appendChild(el('em', tok.slice(1, -1))); }
+      last = m.index + tok.length;
+    }
+    if (last < text.length) { target.appendChild(document.createTextNode(text.slice(last))); }
+    return target;
+  }
+
+  function splitRow(line) {
+    return line.replace(/^\||\|$/g, '').split('|').map(function (c) { return c.trim(); });
+  }
+
+  return function renderMarkdown(src, container) {
+    var lines = String(src == null ? '' : src).split('\n');
+    var i = 0;
+
+    while (i < lines.length) {
+      var line = lines[i];
+
+      /* fenced code */
+      if (/^```/.test(line)) {
+        var buf = [];
+        i++;
+        while (i < lines.length && !/^```/.test(lines[i])) { buf.push(lines[i]); i++; }
+        i++;
+        var pre = document.createElement('pre');
+        pre.appendChild(el('code', buf.join('\n')));
+        container.appendChild(pre);
+        continue;
+      }
+
+      /* table: a header row followed by a separator of dashes */
+      if (line.indexOf('|') !== -1 && i + 1 < lines.length && /^[\s|:-]+$/.test(lines[i + 1])
+          && lines[i + 1].indexOf('-') !== -1) {
+        var table = document.createElement('table');
+        var thead = document.createElement('thead');
+        var htr = document.createElement('tr');
+        splitRow(line).forEach(function (c) { htr.appendChild(inline(el('th'), c)); });
+        thead.appendChild(htr); table.appendChild(thead);
+        var tbody = document.createElement('tbody');
+        i += 2;
+        while (i < lines.length && lines[i].indexOf('|') !== -1) {
+          var tr = document.createElement('tr');
+          splitRow(lines[i]).forEach(function (c) { tr.appendChild(inline(el('td'), c)); });
+          tbody.appendChild(tr); i++;
+        }
+        table.appendChild(tbody);
+        container.appendChild(table);
+        continue;
+      }
+
+      /* heading */
+      var h = /^(#{1,3})\s+(.*)$/.exec(line);
+      if (h) {
+        container.appendChild(inline(el('h' + h[1].length), h[2]));
+        i++; continue;
+      }
+
+      /* horizontal rule */
+      if (/^(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) {
+        container.appendChild(document.createElement('hr'));
+        i++; continue;
+      }
+
+      /* list */
+      if (/^\s*([-*+]|\d+\.)\s+/.test(line)) {
+        var ordered = /^\s*\d+\./.test(line);
+        var list = document.createElement(ordered ? 'ol' : 'ul');
+        while (i < lines.length && /^\s*([-*+]|\d+\.)\s+/.test(lines[i])) {
+          var item = lines[i].replace(/^\s*([-*+]|\d+\.)\s+/, '');
+          list.appendChild(inline(el('li'), item));
+          i++;
+        }
+        container.appendChild(list);
+        continue;
+      }
+
+      /* blank */
+      if (!line.trim()) { i++; continue; }
+
+      /* paragraph: consume until a blank line or a block starter */
+      var para = [];
+      while (i < lines.length && lines[i].trim()
+             && !/^(#{1,3}\s|```|\s*([-*+]|\d+\.)\s)/.test(lines[i])) {
+        para.push(lines[i]); i++;
+      }
+      container.appendChild(inline(el('p'), para.join(' ')));
+    }
+    return container;
+  };
+})();
+</script>
+
+<dialog class="modal" id="appModal" aria-labelledby="appModalTitle">
+  <!-- Deliberately a plain div. The buttons are JS-driven, so a form element
+       would be vestigial here — and a test asserts the admin screen carries no
+       form-POST surface at all, which is a cheap, blunt way to keep CSRF off
+       that page. Do not reintroduce one. -->
+  <div class="modal-body">
+    <h2 id="appModalTitle"></h2>
+    <p id="appModalBody"></p>
+  </div>
+  <div class="modal-actions">
+    <button type="button" id="appModalCancel">Cancel</button>
+    <button type="button" id="appModalConfirm" class="primary">Confirm</button>
+  </div>
+</dialog>
+
+<script>
+/* Modal dialogs, replacing window.confirm/alert.
+   Text is set with textContent only — a conversation title or an error message
+   can contain anything, and this must never become a markup injection path. */
+(function () {
+  var dlg = document.getElementById('appModal');
+  var titleEl = document.getElementById('appModalTitle');
+  var bodyEl = document.getElementById('appModalBody');
+  var cancelBtn = document.getElementById('appModalCancel');
+  var confirmBtn = document.getElementById('appModalConfirm');
+  if (!dlg || !dlg.showModal) { return; }   /* leave natives in place */
+
+  var settle = null;
+
+  function close(result) {
+    var done = settle; settle = null;
+    if (dlg.open) { dlg.close(); }
+    if (done) { done(result); }
+  }
+
+  cancelBtn.addEventListener('click', function () { close(false); });
+  confirmBtn.addEventListener('click', function () { close(true); });
+  /* Esc fires 'cancel'; treat it as declining, never as confirming. */
+  dlg.addEventListener('cancel', function (e) { e.preventDefault(); close(false); });
+  /* Click on the backdrop — i.e. on the dialog element itself, outside its
+     content boxes — also declines. */
+  dlg.addEventListener('click', function (e) {
+    if (e.target === dlg) { close(false); }
+  });
+
+  function open(opts) {
+    titleEl.textContent = opts.title || '';
+    bodyEl.textContent = opts.body || '';
+    confirmBtn.textContent = opts.confirmLabel || 'Confirm';
+    confirmBtn.className = opts.danger ? 'danger' : 'primary';
+    cancelBtn.hidden = !!opts.alertOnly;
+    if (opts.alertOnly) { confirmBtn.textContent = opts.confirmLabel || 'OK'; }
+    return new Promise(function (resolve) {
+      settle = resolve;
+      dlg.showModal();
+      /* Destructive actions focus CANCEL, so a reflexive Enter does not delete
+         anything. Everything else focuses the action, which is what the person
+         came to do. */
+      (opts.danger && !opts.alertOnly ? cancelBtn : confirmBtn).focus();
+    });
+  }
+
+  window.confirmModal = function (opts) { return open(opts || {}); };
+  window.alertModal = function (opts) {
+    return open(Object.assign({alertOnly: true}, opts || {}));
+  };
+})();
+</script>
+
+{% block scripts %}{% endblock %}
+</body>
+</html>
