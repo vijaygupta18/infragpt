@@ -5,7 +5,7 @@
 <p align="center">
   <img alt="read-only" src="https://img.shields.io/badge/access-read--only-1f7a4d?style=flat-square">
   <img alt="python" src="https://img.shields.io/badge/python-3.13-3776ab?style=flat-square">
-  <img alt="tests" src="https://img.shields.io/badge/tests-726-1a6ad4?style=flat-square">
+  <img alt="tests" src="https://img.shields.io/badge/tests-771-1a6ad4?style=flat-square">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-8a837a?style=flat-square">
 </p>
 
@@ -97,7 +97,7 @@ cp scripts/ship.env.example scripts/ship.env      # deployment coordinates
 mkdir -p deploy/private && cp deploy/*.yaml deploy/private/
 $EDITOR deploy/private/*.yaml                     # fill in <PLACEHOLDERS>
 
-pytest -q                    # 726 tests, no infrastructure required
+pytest -q                    # 771 tests, no infrastructure required
 python -m app.eval           # score the selector against the golden set
 ```
 
