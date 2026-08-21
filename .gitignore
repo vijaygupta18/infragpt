@@ -1,0 +1,54 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# Runtime state lives on the PV, never in git.
+data/
+# Local dev data dir — contains a SQLite DB with real CLI tokens and audit logs.
+localdata/
+*.db
+*.db-wal
+*.db-shm
+
+# ---- Deployment values: real ones stay local, templates are committed -------
+#
+# Everything under deploy/private/ carries THIS deployment's identifiers —
+# project ids, account numbers, cluster names, service-account emails, internal
+# IPs. None of it is secret in the cryptographic sense, and all of it is
+# infrastructure detail that does not belong in a published repository.
+#
+# The committed deploy/*.yaml files are TEMPLATES with placeholders. Copy them
+# into deploy/private/, fill them in, and apply from there:
+#
+#     cp deploy/04-deployment.yaml deploy/private/
+#     $EDITOR deploy/private/04-deployment.yaml     # replace <PLACEHOLDERS>
+#     kubectl apply -f deploy/private/
+#
+deploy/private/
+
+# Anything holding real credentials or environment values.
+.env
+.env.*
+*.env
+!*.env.example
+secrets.yaml
+*-secret.yaml
+*-secrets.yaml
+kubeconfig
+*.kubeconfig
+credentials.json
+service-account*.json
+*.pem
+*.key
+!**/tls.key.example
+
+# Local scratch
+scratch/
+tmp/
+*.local
+
+# Deployment coordinates for scripts/ship.sh — see scripts/ship.env.example
+scripts/ship.env
