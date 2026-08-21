@@ -217,7 +217,7 @@ details.spine:not([open]) > .spine-head { margin-bottom: 0; }
 .activity .stopbtn {
   margin-left: .6rem; padding: .1rem .5rem; font-size: .72rem;
   border: 1px solid var(--line); border-radius: var(--r-control);
-  background: var(--card); color: var(--ink-2); cursor: pointer;
+  background: var(--surface); color: var(--ink-2); cursor: pointer;
 }
 .activity .stopbtn:hover:not(:disabled) { color: var(--fail); border-color: var(--fail); }
 .activity .stopbtn:disabled { opacity: .55; cursor: default; }
@@ -260,6 +260,9 @@ details.spine:not([open]) > .spine-head { margin-bottom: 0; }
 
 .activity .step.clickable { cursor: pointer; border-radius: var(--r-control); }
 .activity .step.clickable:hover { background: var(--raised); }
+.activity .step.clickable:focus-visible {
+  outline: 2px solid var(--gcp); outline-offset: 1px; background: var(--raised);
+}
 .activity .step.expanded .args { white-space: normal; overflow: visible; }
 
 .activity .callbody {
@@ -638,6 +641,7 @@ details.spine:not([open]) > .spine-head { margin-bottom: 0; }
     var sum = el('summary');
     var pulse = el('span', 'pulse');
     var label = el('span', null, 'Working');
+    sum.setAttribute('aria-live', 'polite');
     var elapsed = el('span', 'elapsed', '0s');
     /* Stop is available for as long as the run is. It is a button rather than
        a link inside the summary so clicking it never toggles the disclosure
@@ -733,10 +737,22 @@ details.spine:not([open]) > .spine-head { margin-bottom: 0; }
           body.textContent = JSON.stringify(ev.params, null, 2);
           body.hidden = true;
           steps.appendChild(body);
+          /* A clickable div is invisible to a keyboard and to a screen
+             reader. Given real semantics it is reachable by Tab, operable by
+             Enter/Space, and announces both its purpose and its state. */
           row.classList.add('clickable');
-          row.addEventListener('click', function () {
+          row.setAttribute('role', 'button');
+          row.setAttribute('tabindex', '0');
+          row.setAttribute('aria-expanded', 'false');
+          row.setAttribute('aria-label', 'Show the parameters sent to ' + ev.entry_name);
+          var toggle = function () {
             body.hidden = !body.hidden;
             row.classList.toggle('expanded', !body.hidden);
+            row.setAttribute('aria-expanded', String(!body.hidden));
+          };
+          row.addEventListener('click', toggle);
+          row.addEventListener('keydown', function (e) {
+            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
           });
         }
         live[ev.id] = { row: row, mark: mark, timeNode: timeNode,

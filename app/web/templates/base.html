@@ -91,6 +91,14 @@
   --ok:   oklch(51% .13 156);
   --fail: oklch(53% .19 25);
 
+  /* Elevation. A shadow tuned on a white ground all but vanishes on a dark
+     one, so a floating panel stops reading as floating and starts reading as
+     a rendering bug. Two layers: a tight contact shadow that grounds the edge
+     and a wide soft one that carries the height. */
+  --shadow-pop:
+    0 1px 2px oklch(23% .01 75 / .10),
+    0 12px 28px -6px oklch(23% .01 75 / .16);
+
   --mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   --sans: "Geist", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 
@@ -128,6 +136,13 @@
 
     --accent:     oklch(94% .004 80);
     --accent-ink: oklch(16.5% .006 70);
+
+    /* On a dark ground the shadow does almost nothing; the readable edge is a
+       lighter rim, so the elevation is carried by the border and a deeper,
+       wider pool beneath. */
+    --shadow-pop:
+      0 1px 2px oklch(0% 0 0 / .55),
+      0 16px 34px -8px oklch(0% 0 0 / .60);
 
     --gcp:  oklch(76% .13 248);
     --aws:  oklch(79% .13 68);

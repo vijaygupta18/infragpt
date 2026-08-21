@@ -75,7 +75,65 @@ details.role-detail summary:hover { color: var(--ink); }
 .people td .email { font-family: var(--mono); font-size: .82rem; }
 .rolechips { display: flex; gap: .3rem; flex-wrap: wrap; }
 .row-actions { display: flex; align-items: center; gap: .4rem; justify-content: flex-end; }
-.rolesel { font-size: .78rem; padding: .18rem .4rem; max-width: 9.5rem; }
+/* ---- role menu ----------------------------------------------------------
+   A popover of checkboxes. Roles compose, and the panel makes the composition
+   visible: what is ticked, how many surfaces each carries, and a sentence
+   saying what the result will be before it is committed. */
+.rolemenu { position: relative; }
+.rolemenu > summary {
+  list-style: none; cursor: pointer; user-select: none;
+  display: inline-flex; align-items: center; gap: .3rem;
+  padding: .2rem .5rem; font-size: .78rem; max-width: 12rem;
+  border: 1px solid var(--line); border-radius: var(--r-control);
+  color: var(--ink-2); background: var(--surface); white-space: nowrap;
+}
+.rolemenu > summary::-webkit-details-marker { display: none; }
+.rolemenu > summary::after { content: "\25BE"; color: var(--muted); font-size: .7rem; }
+.rolemenu > summary:hover { color: var(--ink); border-color: var(--muted); }
+.rolemenu[open] > summary { border-color: var(--gcp); color: var(--ink); }
+.rolemenu-label { overflow: hidden; text-overflow: ellipsis; }
+
+.rolemenu-panel {
+  position: absolute; right: 0; top: calc(100% + .3rem); z-index: 40;
+  min-width: 15rem; padding: .6rem;
+  background: var(--surface); border: 1px solid var(--line-2);
+  border-radius: var(--r-container);
+  box-shadow: var(--shadow-pop);
+  text-align: left;
+}
+.rolemenu-head {
+  display: flex; align-items: baseline; justify-content: space-between;
+  margin-bottom: .35rem;
+}
+.linkbtn {
+  background: none; border: 0; padding: 0; cursor: pointer;
+  font-size: .74rem; color: var(--gcp);
+}
+.linkbtn:hover { text-decoration: underline; }
+
+.rolemenu-row {
+  display: flex; align-items: center; gap: .5rem;
+  padding: .3rem .35rem; border-radius: var(--r-control); cursor: pointer;
+}
+.rolemenu-row:hover { background: var(--raised); }
+.rolemenu-name { flex: 1; font-size: .84rem; color: var(--ink); }
+.rolemenu-count {
+  font-family: var(--mono); font-size: .68rem; color: var(--muted);
+  padding: .05rem .3rem; background: var(--raised); border-radius: 999px;
+}
+.rolemenu-preview {
+  margin: .5rem 0 .1rem; font-size: .75rem; line-height: 1.45; color: var(--muted);
+  border-top: 1px solid var(--line); padding-top: .45rem;
+}
+.rolemenu-preview.warn { color: var(--aws); }
+.rolemenu-actions {
+  display: flex; justify-content: flex-end; gap: .4rem; margin-top: .5rem;
+}
+.rolemenu-actions button { font-size: .78rem; padding: .22rem .6rem; }
+
+@media (max-width: 760px) {
+  .rolemenu-panel { right: auto; left: 0; }
+}
 @media (max-width: 760px) {
   .row-actions { flex-wrap: wrap; justify-content: flex-start; }
 }
@@ -186,16 +244,40 @@ details.role-detail summary:hover { color: var(--ink); }
                offered on the approval card, so a role could be set once, at
                the moment of approval, and never again — which is the moment
                you know least about what someone needs. #}
-            <select class="rolesel" data-setrole="{{ u.id }}" data-email="{{ u.email }}"
-                    aria-label="Role for {{ u.email }}">
-              <option value="">Change role…</option>
-              {% for r in roles %}
-              <option value="{{ r.key }}" data-label="{{ r.label }}"
-                      {% if r.label in u.roles and u.roles|length == 1 %}selected{% endif %}>
-                {{ r.label }}
-              </option>
-              {% endfor %}
-            </select>
+            {# Roles compose, so this is a set of checkboxes rather than a
+               dropdown. A <select multiple> technically allows the same thing
+               and nobody can operate one: ctrl-click to add, and a stray plain
+               click silently discards every other selection. With three roles
+               the whole set fits in a small panel where the state is simply
+               visible. #}
+            <details class="rolemenu" data-rolemenu="{{ u.id }}">
+              <summary aria-label="Roles for {{ u.email }}">
+                <span class="rolemenu-label">
+                  {%- if u.roles -%}{{ u.roles | join(', ') }}{%- else -%}No role{%- endif -%}
+                </span>
+              </summary>
+              <div class="rolemenu-panel">
+                <div class="rolemenu-head">
+                  <span class="label">Roles</span>
+                  <button type="button" class="linkbtn" data-selectall="{{ u.id }}">Select all</button>
+                </div>
+                {% for r in roles %}
+                <label class="rolemenu-row">
+                  <input type="checkbox" data-rolebox="{{ u.id }}" value="{{ r.key }}"
+                         data-label="{{ r.label }}"
+                         {% if r.label in u.roles %}checked{% endif %}>
+                  <span class="rolemenu-name">{{ r.label }}</span>
+                  <span class="rolemenu-count">{{ r.surfaces|length }}</span>
+                </label>
+                {% endfor %}
+                <p class="rolemenu-preview" data-preview="{{ u.id }}"></p>
+                <div class="rolemenu-actions">
+                  <button type="button" class="ghost" data-rolecancel="{{ u.id }}">Cancel</button>
+                  <button type="button" class="primary" data-rolesave="{{ u.id }}"
+                          data-email="{{ u.email }}">Save</button>
+                </div>
+              </div>
+            </details>
             {% if u.status == 'active' %}
             <button class="ghost danger" type="button"
                     data-disable="{{ u.id }}" data-email="{{ u.email }}">Disable</button>
@@ -281,35 +363,87 @@ details.role-detail summary:hover { color: var(--ink); }
     });
   });
 
-  /* Changing a role REPLACES what someone holds, so it can take access away.
-     That is the whole point of an editor — but it also means a mis-click is a
-     real change, so it confirms and says plainly what will happen. */
-  document.querySelectorAll('[data-setrole]').forEach(function (sel) {
-    var previous = sel.value;
-    sel.addEventListener('change', function () {
-      var role = sel.value;
-      if (!role) { return; }
-      var opt = sel.options[sel.selectedIndex];
-      var label = opt.getAttribute('data-label');
-      var userId = sel.getAttribute('data-setrole');
-      var email = sel.getAttribute('data-email');
+  /* Changing roles REPLACES what someone holds, so it can take access away.
+     That is the point of an editor — and it is also why it confirms, says
+     plainly what will happen, and previews the result before you commit. */
+  document.querySelectorAll('[data-rolemenu]').forEach(function (menu) {
+    var id = menu.getAttribute('data-rolemenu');
+    var boxes = Array.prototype.slice.call(
+      menu.querySelectorAll('[data-rolebox="' + id + '"]'));
+    var preview = menu.querySelector('[data-preview="' + id + '"]');
+    var saveBtn = menu.querySelector('[data-rolesave="' + id + '"]');
+    var selectAll = menu.querySelector('[data-selectall="' + id + '"]');
+    var cancel = menu.querySelector('[data-rolecancel="' + id + '"]');
+    var labelEl = menu.querySelector('.rolemenu-label');
+    var original = boxes.filter(function (b) { return b.checked; })
+                        .map(function (b) { return b.value; }).join(',');
+
+    function chosen() {
+      return boxes.filter(function (b) { return b.checked; });
+    }
+    function refresh() {
+      var picked = chosen();
+      var names = picked.map(function (b) { return b.getAttribute('data-label'); });
+      /* Say what happens, including the case that surprises people: unticking
+         everything is a valid choice and it removes all access. */
+      preview.textContent = picked.length
+        ? 'Access becomes exactly: ' + names.join(' + ')
+        : 'No roles selected — this removes all access.';
+      preview.className = 'rolemenu-preview' + (picked.length ? '' : ' warn');
+      saveBtn.disabled =
+        picked.map(function (b) { return b.value; }).join(',') === original;
+      selectAll.textContent =
+        picked.length === boxes.length ? 'Clear all' : 'Select all';
+    }
+    boxes.forEach(function (b) { b.addEventListener('change', refresh); });
+    refresh();
+
+    selectAll.addEventListener('click', function () {
+      var all = chosen().length === boxes.length;
+      boxes.forEach(function (b) { b.checked = !all; });
+      refresh();
+    });
+
+    cancel.addEventListener('click', function () {
+      var was = original ? original.split(',') : [];
+      boxes.forEach(function (b) { b.checked = was.indexOf(b.value) !== -1; });
+      refresh();
+      menu.open = false;
+    });
+
+    saveBtn.addEventListener('click', function () {
+      var picked = chosen();
+      var keys = picked.map(function (b) { return b.value; });
+      var names = picked.map(function (b) { return b.getAttribute('data-label'); });
+      var email = saveBtn.getAttribute('data-email');
       window.confirmModal({
-        title: 'Set ' + email + ' to ' + label + '?',
-        body: 'Their access becomes exactly what the ' + label + ' role covers. '
-            + 'Anything they hold outside that role is removed.',
-        confirmLabel: 'Set ' + label
+        title: keys.length ? 'Set roles for ' + email + '?'
+                           : 'Remove all access for ' + email + '?',
+        body: keys.length
+          ? 'Their access becomes exactly ' + names.join(' + ')
+            + '. Anything they hold outside those roles is removed.'
+          : 'They keep their account but will not be able to look anything up.',
+        confirmLabel: keys.length ? 'Save' : 'Remove access',
+        danger: !keys.length
       }).then(function (ok) {
-        if (!ok) { sel.value = previous; return; }
-        sel.disabled = true;
-        post('/admin/users/' + userId + '/role', { role: role })
+        if (!ok) { return; }
+        saveBtn.disabled = true;
+        saveBtn.textContent = 'Saving…';
+        post('/admin/users/' + id + '/role', { roles: keys })
           .then(function () { window.location.reload(); })
           .catch(function (e) {
-            sel.disabled = false;
-            sel.value = previous;
-            window.alertModal({ title: 'Could not change the role', body: e.message });
+            saveBtn.disabled = false;
+            saveBtn.textContent = 'Save';
+            window.alertModal({ title: 'Could not change the roles', body: e.message });
           });
       });
     });
+
+    /* Clicking outside closes the panel, the way every other menu behaves. */
+    document.addEventListener('click', function (e) {
+      if (menu.open && !menu.contains(e.target)) { menu.open = false; }
+    });
+    if (labelEl) { /* label is rendered server-side; kept for a11y hooks */ }
   });
 
   document.querySelectorAll('[data-disable]').forEach(function (btn) {

@@ -1019,3 +1019,57 @@ def test_no_admin_route_answers_a_non_admin(client, member) -> None:
             )
             checked += 1
     assert checked >= 15
+
+
+def _uid(client, admin, email: str) -> int:
+    users = client.get("/admin/users", headers=admin).json()
+    return next(u["id"] for u in users if u["email"] == email)
+
+
+def test_roles_compose_and_replace(client, admin, member) -> None:
+    """Several roles at once, and saving REPLACES rather than accumulates.
+
+    The console displayed people as holding several roles long before it could
+    set that. Replacement is the half that matters: granting analytics to an
+    admin used to leave every admin surface in place, so the demotion silently
+    did nothing.
+    """
+    from app.access.roles import BY_KEY
+
+    uid = _uid(client, admin, "dev@example.com")
+
+    r = client.post(f"/admin/users/{uid}/role",
+                    json={"roles": ["infra", "analytics"]}, headers=admin)
+    assert r.status_code == 200, r.text
+    expected = {s.value for k in ("infra", "analytics") for s in BY_KEY[k].surfaces}
+    assert set(r.json()["grants"]) == expected
+
+    # Narrowing must REMOVE what the wider set carried.
+    r = client.post(f"/admin/users/{uid}/role",
+                    json={"roles": ["analytics"]}, headers=admin)
+    assert r.status_code == 200
+    held = set(r.json()["grants"])
+    assert held == {s.value for s in BY_KEY["analytics"].surfaces}
+    assert "k8s:gcp" not in held, "narrowing left an infra surface behind"
+
+
+def test_single_role_field_still_works(client, admin, member) -> None:
+    """`role` stays accepted so existing callers do not break."""
+    from app.access.roles import BY_KEY
+
+    uid = _uid(client, admin, "dev@example.com")
+    r = client.post(f"/admin/users/{uid}/role", json={"role": "analytics"}, headers=admin)
+    assert r.status_code == 200
+    assert set(r.json()["grants"]) == {s.value for s in BY_KEY["analytics"].surfaces}
+
+
+def test_an_empty_or_unknown_role_set_is_refused(client, admin, member) -> None:
+    uid = _uid(client, admin, "dev@example.com")
+    assert client.post(f"/admin/users/{uid}/role",
+                       json={"roles": []}, headers=admin).status_code == 400
+    assert client.post(f"/admin/users/{uid}/role",
+                       json={}, headers=admin).status_code == 400
+    bad = client.post(f"/admin/users/{uid}/role",
+                      json={"roles": ["infra", "wizard"]}, headers=admin)
+    assert bad.status_code == 400
+    assert "wizard" in bad.text

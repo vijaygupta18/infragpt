@@ -12,7 +12,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
-from app.access.roles import BY_KEY, ROLES
+from app.access.roles import BY_KEY, ROLES, Role
 from app.audit import read_audit
 from app.auth.deps import Principal, require_admin
 from app.registry.schema import Surface
@@ -134,7 +134,41 @@ async def list_surfaces() -> list[str]:
     return [s.value for s in Surface]
 
 class ApproveIn(BaseModel):
-    role: str
+    """One role or several.
+
+    Roles compose: someone can genuinely be both Infra and Analytics, and the
+    console already DISPLAYED people that way while offering no means to set
+    it. `role` stays accepted so existing callers keep working; `roles` is the
+    real field.
+    """
+
+    role: str | None = None
+    roles: list[str] | None = None
+
+    def keys(self) -> list[str]:
+        chosen = list(self.roles or ([self.role] if self.role else []))
+        # Order-preserving dedupe: an approver who ticks the same role twice
+        # through two paths meant it once.
+        seen: dict[str, None] = {}
+        for k in chosen:
+            seen.setdefault(k, None)
+        return list(seen)
+
+
+def _resolve_roles(body: ApproveIn) -> list[Role]:
+    keys = body.keys()
+    if not keys:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="pick at least one role",
+        )
+    unknown = [k for k in keys if k not in BY_KEY]
+    if unknown:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"unknown role(s): {', '.join(sorted(unknown))}",
+        )
+    return [BY_KEY[k] for k in keys]
 
 
 @router.post("/users/{user_id}/approve", response_model=UserOut)
@@ -151,15 +185,11 @@ async def approve_user(
     grants to be sorted out later, which either never happens or gets settled by
     ticking everything.
     """
-    role = BY_KEY.get(body.role)
-    if role is None:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"unknown role {body.role!r}",
-        )
+    roles = _resolve_roles(body)
     _user_out(storage, user_id)  # 404 before mutating
-    for surface in role.surfaces:
-        storage.grants.grant(user_id, surface, admin.email)
+    for role in roles:
+        for surface in role.surfaces:
+            storage.grants.grant(user_id, surface, admin.email)
     storage.users.set_status(user_id, "active", admin.email)
     return _user_out(storage, user_id)
 
@@ -183,15 +213,10 @@ async def set_role(
     is a separate endpoint rather than a flag on approve — a caller cannot ask
     for "add" and get "replace" by accident.
     """
-    role = BY_KEY.get(body.role)
-    if role is None:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"unknown role {body.role!r}",
-        )
+    roles = _resolve_roles(body)
     _user_out(storage, user_id)  # 404 before mutating
 
-    wanted = {s.value for s in role.surfaces}
+    wanted = {s.value for r in roles for s in r.surfaces}
     held = set(storage.grants.surfaces_for_user(user_id))
     for surface in sorted(held - wanted):
         storage.grants.revoke(user_id, surface)
