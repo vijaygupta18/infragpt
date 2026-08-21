@@ -343,11 +343,9 @@ async def _answer(
                    detail=", ".join(c.name for c in pending))
         before = len(calls_out)
         await _run_calls(
-            pending, calls_out, registry, surfaces, email, conv.id, question
+            pending, calls_out, registry, surfaces, email, conv.id, question,
+            say=_say, first_index=before,
         )
-        for c in calls_out[before:]:
-            await _say("call", entry_name=c.entry_name, params=c.params,
-                       cloud=c.cloud, ok=c.ok, error=c.error)
         pending = []
         if rounds >= MAX_SELECTION_ROUNDS:
             break
@@ -384,10 +382,38 @@ async def _answer(
 
     await _say("stage", stage="synthesizing",
                detail=f"reading {len(calls_out)} result(s)")
+    # Stream the answer when someone is watching. Synthesis is the longest
+    # single wait in a question, and a spinner for twenty seconds after the
+    # evidence is already in reads as a hang. Streaming changes nothing about
+    # the answer, only about how long it FEELS.
+    #
+    # The fallback is deliberate and silent: a gateway that does not support
+    # SSE, or a stream that dies mid-flight, must cost a little latency and not
+    # the answer. Same call, same prompt, non-streaming.
     try:
-        answer, synth_usage = await grid.synthesize(
-            question, _evidence(calls_out), context=selector_context
-        )
+        if emit is not None:
+            try:
+                async def _token(piece: str) -> None:
+                    await _say("token", text=piece)
+
+                answer, synth_usage = await grid.synthesize_stream(
+                    question, _evidence(calls_out),
+                    context=selector_context, on_token=_token,
+                )
+            except Exception:  # noqa: BLE001
+                # ANY streaming failure falls back, not just GridError: a
+                # gateway that does not implement SSE fails in whatever way it
+                # likes, and this path exists precisely to survive that. The
+                # retry is the real attempt — if the answer cannot be written
+                # at all, the non-streaming call raises and the user is told.
+                await _say("token_reset")
+                answer, synth_usage = await grid.synthesize(
+                    question, _evidence(calls_out), context=selector_context
+                )
+        else:
+            answer, synth_usage = await grid.synthesize(
+                question, _evidence(calls_out), context=selector_context
+            )
     except GridError as exc:
         raise _fail(f"synthesis failed: {exc}") from exc
     usage = usage + synth_usage
@@ -419,6 +445,8 @@ async def _run_calls(
     email: str,
     conversation_id: int,
     question: str,
+    say: Callable[..., Awaitable[None]] | None = None,
+    first_index: int = 0,
 ) -> None:
     """Execute one round of selected calls, appending to `calls_out`.
 
@@ -435,10 +463,26 @@ async def _run_calls(
     Every call is audited, and a failure is recorded as a failed ToolCallOut
     rather than raised — the synthesiser must see failures, not be shielded
     from them.
+
+    PROGRESS IS EMITTED TWICE PER CALL: once when it STARTS and again when it
+    finishes. Emitting only on completion made the concurrency invisible — the
+    screen sat still for as long as the slowest backend took, then printed a
+    burst of finished rows, so a working parallel round looked like a hung
+    serial one. The start event is what lets the UI show four things running at
+    once, which is both truthful and the only honest way to explain a 30s wait.
     """
 
-    async def _one(call: Any) -> ToolCallOut:
+    async def _one(index: int, call: Any) -> ToolCallOut:
         call_started = time.monotonic()
+        if say is not None:
+            # Before the await, so it is on the wire while the backend works.
+            await say(
+                "call_start",
+                id=index,
+                entry_name=call.name,
+                params=call.arguments,
+                cloud=call.arguments.get("cloud"),
+            )
         result = await dispatch(call.name, call.arguments, granted_surfaces=surfaces)
 
         cloud = call.arguments.get("cloud")
@@ -471,7 +515,7 @@ async def _run_calls(
             chars=len(out_text or ""),
             duration_ms=int((time.monotonic() - call_started) * 1000),
         )
-        return ToolCallOut(
+        out = ToolCallOut(
             entry_name=call.name,
             params=call.arguments,
             target=target,
@@ -480,10 +524,28 @@ async def _run_calls(
             error=result.error,
             output=out_text,
         )
+        if say is not None:
+            await say(
+                "call",
+                id=index,
+                entry_name=out.entry_name,
+                params=out.params,
+                cloud=out.cloud,
+                target=target,
+                ok=out.ok,
+                error=out.error,
+                rows=len(result.rows or []),
+                chars=len(out_text or ""),
+                duration_ms=int((time.monotonic() - call_started) * 1000),
+            )
+        return out
 
     # return_exceptions: one backend raising must not discard the results of
     # the calls that succeeded alongside it.
-    results = await asyncio.gather(*(_one(c) for c in calls), return_exceptions=True)
+    results = await asyncio.gather(
+        *(_one(first_index + i, c) for i, c in enumerate(calls)),
+        return_exceptions=True,
+    )
     for call, outcome in zip(calls, results, strict=True):
         if isinstance(outcome, BaseException):
             calls_out.append(

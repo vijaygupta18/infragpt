@@ -122,3 +122,19 @@ def test_admin_covers_every_surface_including_future_ones() -> None:
     assert set(admin.surfaces) == set(Surface), (
         "a surface exists that Admin does not cover — derive, do not hand-list"
     )
+
+
+def test_admin_role_covers_every_surface():
+    """Admin must mean ALL surfaces, including ones added later.
+
+    This is not theoretical: adding the `code` surface silently left every
+    existing admin holding 12 of 13, so the console displayed them as
+    "Analytics" and the code-reading functions were unusable for the person
+    who owned the tool. A role that drifts out of date is worse than no role,
+    because it still looks authoritative.
+    """
+    from app.access.roles import BY_KEY, Surface
+
+    admin = BY_KEY["admin"]
+    missing = {s.value for s in Surface} - {s.value for s in admin.surfaces}
+    assert not missing, f"admin role is missing surfaces: {sorted(missing)}"

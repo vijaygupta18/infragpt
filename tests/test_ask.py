@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -75,6 +76,14 @@ class FakeGrid:
         if isinstance(self.selection, Exception):
             raise self.selection
         return self.selection
+
+    async def synthesize_stream(self, question, evidence, context="", on_token=None):  # noqa: ANN001,ANN201
+        """Stream the same text the non-streaming stub returns, in pieces."""
+        text, usage = await self.synthesize(question, evidence, context)
+        if on_token is not None:
+            for word in text.split(" "):
+                await on_token(word + " ")
+        return text, usage
 
     async def synthesize(self, question, evidence, context=""):  # noqa: ANN001,ANN201
         self.evidence = evidence
@@ -618,3 +627,56 @@ def test_call_order_survives_concurrency() -> None:
 
     source = inspect.getsource(ask._run_calls)
     assert "zip(calls, results" in source
+
+
+@pytest.mark.anyio
+async def test_call_start_precedes_result_and_ids_match(monkeypatch):
+    """Every call announces itself BEFORE it runs, and settles under the same id.
+
+    This is the whole basis of the live UI: a row is created on `call_start`
+    and found again on `call`. If the ids drifted, rows would spin forever
+    while duplicates piled up underneath — and the failure would only ever
+    appear in a browser, never in a test.
+    """
+    from app.api import ask as ask_mod
+
+    events: list[tuple[str, dict]] = []
+
+    async def say(kind, **payload):
+        events.append((kind, payload))
+
+    class _Call:
+        def __init__(self, name):
+            self.name = name
+            self.arguments = {"query": f"select from {name}"}
+
+    async def fake_dispatch(name, args, granted_surfaces=None):
+        from app.executors.base import ExecResult
+        return ExecResult(ok=True, entry_name=name, target="t",
+                          rows=[{"a": 1}], text="x", duration_ms=1)
+
+    monkeypatch.setattr(ask_mod, "dispatch", fake_dispatch)
+    monkeypatch.setattr(ask_mod.audit, "audit_call", lambda **kw: None)
+
+    out: list = []
+    calls = [_Call("one"), _Call("two"), _Call("three")]
+    await ask_mod._run_calls(
+        calls, out, registry=SimpleNamespace(get=lambda n: None),
+        surfaces=set(), email="e@x", conversation_id=1, question="q",
+        say=say, first_index=0,
+    )
+
+    starts = [p for k, p in events if k == "call_start"]
+    ends = [p for k, p in events if k == "call"]
+    assert len(starts) == len(ends) == 3
+    assert {s["id"] for s in starts} == {e["id"] for e in ends} == {0, 1, 2}
+
+    # Ordering: a call's start must be on the wire before its own result.
+    order = [(k, p["id"]) for k, p in events if k in ("call_start", "call")]
+    for cid in (0, 1, 2):
+        assert order.index(("call_start", cid)) < order.index(("call", cid))
+
+    # Params ride along on the start event — that is what the row expands to.
+    assert all("query" in s["params"] for s in starts)
+    # Results are ordered as the model asked, regardless of completion order.
+    assert [c.entry_name for c in out] == ["one", "two", "three"]

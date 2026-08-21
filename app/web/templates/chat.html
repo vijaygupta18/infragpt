@@ -215,6 +215,72 @@ details.spine:not([open]) > .spine-head { margin-bottom: 0; }
 .step .detail { color: var(--muted); word-break: break-all; }
 .activity .elapsed { font-family: var(--mono); color: var(--muted); }
 
+/* While streaming, the text is plain and gets a soft caret so it reads as
+   still-arriving rather than finished-and-badly-formatted. */
+.answer.streaming { white-space: pre-wrap; }
+.answer.streaming::after {
+  content: ""; display: inline-block; width: .45rem; height: 1em;
+  margin-left: .12rem; vertical-align: text-bottom;
+  background: var(--gcp); opacity: .65; animation: caret 1s steps(1) infinite;
+}
+@keyframes caret { 50% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .answer.streaming::after { animation: none; } }
+
+/* ---- live call rows -----------------------------------------------------
+   A row is on screen for as long as its call takes, so the wait is explained
+   rather than merely endured. Several rows spin at once during a parallel
+   round — that is the honest picture of what the backend is doing. */
+.activity .step.call { align-items: baseline; }
+.activity .step.call .ms {
+  margin-left: auto; padding-left: .6rem; font-family: var(--mono);
+  font-size: .72rem; color: var(--muted); font-variant-numeric: tabular-nums;
+  flex: none;
+}
+.activity .step.running .what { color: var(--ink); }
+.activity .step.running .ms   { color: var(--gcp); }
+
+.activity .step .args {
+  font-family: var(--mono); font-size: .72rem; color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  max-width: 46ch; min-width: 0;
+}
+.activity .step .note    { color: var(--muted); font-size: .74rem; }
+.activity .step .errnote { color: var(--fail);  font-size: .74rem; }
+
+.activity .step.clickable { cursor: pointer; border-radius: var(--r-control); }
+.activity .step.clickable:hover { background: var(--raised); }
+.activity .step.expanded .args { white-space: normal; overflow: visible; }
+
+.activity .callbody {
+  margin: .1rem 0 .45rem 1.5rem; padding: .5rem .6rem;
+  background: var(--raised); border-radius: var(--r-control);
+  font-family: var(--mono); font-size: .72rem; line-height: 1.5;
+  color: var(--ink-2); white-space: pre-wrap; word-break: break-word;
+  max-height: 16rem; overflow: auto;
+}
+
+/* The spinner. A ring rather than a dot: at 10px a rotating dot reads as a
+   rendering glitch, a ring reads as motion. */
+.activity .spin {
+  display: inline-block; width: 9px; height: 9px; border-radius: 50%;
+  border: 1.5px solid var(--line); border-top-color: var(--gcp);
+  animation: spin .7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Settling a row is a state change worth one frame of attention — enough to
+   catch the eye in a list of ten, not enough to be a light show. */
+.activity .step.done, .activity .step.failed { animation: settle .5s ease-out; }
+@keyframes settle {
+  from { background: color-mix(in srgb, var(--gcp) 14%, transparent); }
+  to   { background: transparent; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .activity .spin { animation: none; border-top-color: var(--line); }
+  .activity .step.done, .activity .step.failed { animation: none; }
+}
+
 /* ---- pending ------------------------------------------------------------- */
 
 .pending { display: flex; align-items: center; gap: .5rem; color: var(--muted); font-size: .86rem; }
@@ -546,6 +612,15 @@ details.spine:not([open]) > .spine-head { margin-bottom: 0; }
      afterwards — which function, which cloud, did it succeed — reported as they
      happen instead of after a silent wait. */
 
+  /* Each call gets a LIVE row: it appears the moment the call starts, ticks its
+     own elapsed time while in flight, and settles into done/failed with what it
+     returned. Rows for one round are all in flight together, so the concurrency
+     is on screen instead of being something the user has to take on faith.
+
+     A row expands to show the parameters actually sent — the SQL, the PromQL,
+     the command. "ch_query" three times over tells you nothing; three different
+     queries is the thing worth seeing, and it is also how you catch the model
+     asking the same question twice. */
   function makeActivity() {
     var box = el('details', 'activity');
     box.open = true;
@@ -559,21 +634,111 @@ details.spine:not([open]) > .spine-head { margin-bottom: 0; }
     box.appendChild(steps);
 
     var t0 = Date.now();
+    var live = {};          /* id -> {row, started, timer} */
     var ticker = setInterval(function () {
       elapsed.textContent = Math.round((Date.now() - t0) / 1000) + 's';
-    }, 500);
+      for (var k in live) {
+        if (!live[k].timeNode) { continue; }
+        live[k].timeNode.textContent =
+          ((Date.now() - live[k].started) / 1000).toFixed(1) + 's';
+      }
+    }, 100);
+
+    function paramSummary(params) {
+      if (!params) { return ''; }
+      /* Prefer the field that carries the actual work. */
+      var keys = ['query', 'sql', 'command', 'promql', 'expr', 'name', 'table',
+                  'key', 'pattern', 'file', 'request_id'];
+      for (var i = 0; i < keys.length; i++) {
+        var v = params[keys[i]];
+        if (typeof v === 'string' && v.trim()) {
+          return v.replace(/\s+/g, ' ').trim();
+        }
+      }
+      var parts = [];
+      for (var k in params) {
+        if (k === 'cloud') { continue; }
+        parts.push(k + '=' + params[k]);
+      }
+      return parts.join('  ');
+    }
 
     return {
       node: box,
+
+      /* A plain stage line (selecting / synthesizing). */
       step: function (what, detail, state) {
         var row = el('div', 'step' + (state ? ' ' + state : ''));
         row.appendChild(el('span', 'mark',
-          state === 'done' ? '\u2713' : state === 'failed' ? '\u00d7' : '\u203a'));
+          state === 'done' ? '✓' : state === 'failed' ? '×' : '›'));
         row.appendChild(el('span', 'what', what));
         if (detail) { row.appendChild(el('span', 'detail', detail)); }
         steps.appendChild(row);
         return row;
       },
+
+      /* A call has begun. Render it in flight. */
+      callStart: function (ev) {
+        var row = el('div', 'step call running');
+        var mark = el('span', 'mark');
+        mark.appendChild(el('span', 'spin'));
+        row.appendChild(mark);
+
+        var head = el('span', 'what');
+        head.textContent = ev.entry_name + (ev.cloud ? ' · ' + ev.cloud : '');
+        row.appendChild(head);
+
+        var summary = paramSummary(ev.params);
+        if (summary) { row.appendChild(el('span', 'detail args', summary)); }
+
+        var timeNode = el('span', 'ms', '0.0s');
+        row.appendChild(timeNode);
+        steps.appendChild(row);
+
+        /* Full params, revealed on click — hidden by default so a round of ten
+           calls stays readable. */
+        var body = null;
+        if (ev.params && Object.keys(ev.params).length) {
+          body = el('pre', 'callbody');
+          body.textContent = JSON.stringify(ev.params, null, 2);
+          body.hidden = true;
+          steps.appendChild(body);
+          row.classList.add('clickable');
+          row.addEventListener('click', function () {
+            body.hidden = !body.hidden;
+            row.classList.toggle('expanded', !body.hidden);
+          });
+        }
+        live[ev.id] = { row: row, mark: mark, timeNode: timeNode,
+                        started: Date.now(), body: body };
+        return row;
+      },
+
+      /* The same call has finished. Settle the row already on screen. */
+      callEnd: function (ev) {
+        var rec = live[ev.id];
+        if (!rec) { return this.step(ev.entry_name, ev.ok ? '' : (ev.error || 'failed'),
+                                     ev.ok ? 'done' : 'failed'); }
+        delete live[ev.id];
+        rec.row.classList.remove('running');
+        rec.row.classList.add(ev.ok ? 'done' : 'failed');
+        rec.mark.textContent = ev.ok ? '✓' : '×';
+        rec.timeNode.textContent =
+          ev.duration_ms >= 1000 ? (ev.duration_ms / 1000).toFixed(1) + 's'
+                                 : ev.duration_ms + 'ms';
+        /* What came back, so an EMPTY result is visible as empty rather than
+           reading as success. */
+        var note = ev.ok
+          ? (ev.rows ? ev.rows + (ev.rows === 1 ? ' row' : ' rows')
+                     : (ev.chars ? '' : 'no rows'))
+          : (ev.error || 'failed');
+        if (note) {
+          var n = el('span', 'detail ' + (ev.ok ? 'note' : 'errnote'), note);
+          rec.row.insertBefore(n, rec.timeNode);
+        }
+        return rec.row;
+      },
+
       finish: function (text) {
         clearInterval(ticker);
         pulse.remove();
@@ -606,17 +771,48 @@ details.spine:not([open]) > .spine-head { margin-bottom: 0; }
     };
     var openStage = null;
     var callCount = 0;
+    var roundNo = 0;
+    var streamEl = null;
+    var streamText = '';
 
     function handle(ev) {
       if (ev.type === 'stage') {
         if (openStage) { openStage.classList.add('done'); openStage.firstChild.textContent = '\u2713'; }
-        openStage = activity.step(STAGE_TEXT[ev.stage] || ev.stage, ev.detail || '');
+        /* The 'running' stage used to list the call names, which then appeared
+           again as a row each. Duplicated text reads as duplicated work. The
+           rows say it better, so this stage only announces the round. */
+        if (ev.stage === 'running') {
+          roundNo++;
+          openStage = activity.step(
+            roundNo === 1 ? 'Gathering evidence' : 'Following up (round ' + roundNo + ')',
+            (ev.detail || '').split(',').length > 1
+              ? (ev.detail || '').split(',').length + ' in parallel' : '');
+        } else {
+          openStage = activity.step(STAGE_TEXT[ev.stage] || ev.stage, ev.detail || '');
+        }
+      } else if (ev.type === 'call_start') {
+        activity.callStart(ev);
       } else if (ev.type === 'call') {
         callCount++;
-        var where = ev.cloud ? ' \u00b7 ' + ev.cloud : '';
-        activity.step(ev.entry_name + where,
-                      ev.ok ? '' : (ev.error || 'failed'),
-                      ev.ok ? 'done' : 'failed');
+        activity.callEnd(ev);
+      } else if (ev.type === 'token') {
+        /* The answer appears as it is written. Raw text while streaming, then
+           re-rendered as markdown once complete — half a table or an unclosed
+           code fence looks broken mid-stream, and a flicker of broken layout
+           reads worse than plain text that firms up at the end. */
+        if (!streamEl) {
+          if (openStage) { openStage.classList.add('done'); openStage.firstChild.textContent = '\u2713'; }
+          streamEl = el('div', 'answer md streaming');
+          turn.appendChild(streamEl);
+        }
+        streamText += ev.text;
+        streamEl.textContent = streamText;
+        turn.scrollIntoView({ block: 'end' });
+      } else if (ev.type === 'token_reset') {
+        /* Streaming failed and the backend is retrying without it. Drop what
+           arrived so a partial answer never merges with the complete one. */
+        streamText = '';
+        if (streamEl) { streamEl.remove(); streamEl = null; }
       } else if (ev.type === 'answer') {
         if (openStage) { openStage.classList.add('done'); openStage.firstChild.textContent = '\u2713'; }
         activity.finish(callCount + (callCount === 1 ? ' call' : ' calls'));
@@ -629,10 +825,19 @@ details.spine:not([open]) > .spine-head { margin-bottom: 0; }
            that reads differently from the same answer on reload is two
            interfaces wearing one name. */
         var calls = ev.calls || [];
-        turn.appendChild(calls.length ? renderSpine(calls) : renderNoEvidence());
-        var answer = el('div', 'answer md');
+        var spine = calls.length ? renderSpine(calls) : renderNoEvidence();
+        /* The spine belongs ABOVE the answer, but the streamed answer node is
+           already in the DOM — insert before it rather than appending, so the
+           streamed turn and the same turn on reload have identical order. */
+        if (streamEl) { turn.insertBefore(spine, streamEl); }
+        else { turn.appendChild(spine); }
+
+        var answer = streamEl || el('div', 'answer md');
+        answer.classList.remove('streaming');
+        answer.textContent = '';
         window.renderMarkdown(ev.answer, answer);
-        turn.appendChild(answer);
+        if (!streamEl) { turn.appendChild(answer); }
+        streamEl = null;
         var tools = el('div', 'answer-tools');
         tools.appendChild(copyButton(function () { return ev.answer; }));
         turn.appendChild(tools);

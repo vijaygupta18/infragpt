@@ -969,3 +969,53 @@ def test_the_favicon_is_served_and_linked(client, member) -> None:
     icon = client.get("/static/icon.svg")
     assert icon.status_code == 200
     assert "svg" in icon.headers.get("content-type", "")
+
+
+def test_no_admin_route_answers_a_non_admin(client, member) -> None:
+    """Every /admin route, enumerated from the app, must refuse a non-admin.
+
+    Behavioural on purpose. The first version of this test introspected the
+    dependency tree, and it was wrong twice — once scanning an empty list, once
+    matching a repr that never contains the dependency name. Both times it
+    would have gone green while proving nothing. Calling the route and reading
+    the status cannot be fooled that way, and it also covers the HTML pages,
+    which gate inside the handler rather than through a dependency.
+
+    Enumerated rather than listed by hand so a route added later is covered
+    without anyone remembering to add it here.
+    """
+    from app.main import app
+
+    def leaves(routes):
+        # Included routers are nested; reaching them needs `original_router`.
+        for r in routes:
+            inner = getattr(r, "original_router", None)
+            if inner is not None:
+                yield from leaves(inner.routes)
+            else:
+                yield r
+
+    routes = [
+        r for r in leaves(app.routes)
+        if getattr(r, "path", "").startswith("/admin")
+    ]
+    assert len(routes) >= 15, f"scanned only {len(routes)} admin routes"
+
+    checked = 0
+    for route in routes:
+        for method in sorted(route.methods or []):
+            if method in ("HEAD", "OPTIONS"):
+                continue
+            # Concrete values for path params; the guard must reject before
+            # anything looks at whether the id exists.
+            path = route.path.replace("{user_id}", "1")
+            path = path.replace("{surface}", "metrics").replace("{slug}", "x")
+            fn = getattr(client, method.lower())
+            resp = (
+                fn(path, json={}) if method in ("POST", "PUT", "PATCH") else fn(path)
+            )
+            assert resp.status_code in (401, 403), (
+                f"{method} {path} answered {resp.status_code} for a non-admin"
+            )
+            checked += 1
+    assert checked >= 15

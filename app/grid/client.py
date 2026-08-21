@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -221,6 +222,100 @@ class GridClient:
         except (KeyError, IndexError) as exc:
             raise GridError("gateway response missing choices[0].message") from exc
         return content.strip(), usage
+
+    async def synthesize_stream(
+        self,
+        question: str,
+        evidence: str,
+        context: str = "",
+        on_token: Callable[[str], Awaitable[None]] | None = None,
+    ) -> tuple[str, Usage]:
+        """Same answer as `synthesize`, delivered as it is written.
+
+        Synthesis is the longest single wait in a question — the evidence is
+        already gathered, and the user watches a spinner while a large model
+        writes several paragraphs. Streaming does not make it faster; it makes
+        it legible, which is the part that matters when someone is waiting.
+
+        The full text is still returned and stored, so the streamed turn and the
+        same turn on reload are the same text. If streaming fails for any
+        reason, the caller falls back to the non-streaming path rather than
+        losing the answer.
+        """
+        if not self.synth_model:
+            raise GridError("GRID_SYNTH_MODEL is not configured")
+
+        from app.grid.prompts import SYNTH_SYSTEM
+
+        payload = {
+            "model": self.synth_model,
+            "temperature": 0,
+            "stream": True,
+            # Ask for usage on the final chunk; gateways that don't support the
+            # option ignore it, and we fall back to a zero Usage.
+            "stream_options": {"include_usage": True},
+            "messages": [
+                {"role": "system", "content": SYNTH_SYSTEM},
+                {
+                    "role": "user",
+                    "content": (
+                        f"Question:\n{question}\n\n"
+                        + (f"Reference material:\n{context}\n\n" if context else "")
+                        + f"Tool output (already redacted):\n{evidence}"
+                    ),
+                },
+            ],
+        }
+
+        url = f"{self.base_url}/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {_api_key()}",
+            "Content-Type": "application/json",
+        }
+        parts: list[str] = []
+        usage = Usage(0, 0)
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout_s) as client:
+                async with client.stream(
+                    "POST", url, json=payload, headers=headers
+                ) as resp:
+                    if resp.status_code >= 400:
+                        await resp.aread()
+                        raise GridError(
+                            f"gateway returned {resp.status_code}: {resp.text[:400]}"
+                        )
+                    async for line in resp.aiter_lines():
+                        if not line.startswith("data:"):
+                            continue
+                        data = line[5:].strip()
+                        if not data or data == "[DONE]":
+                            continue
+                        try:
+                            chunk = json.loads(data)
+                        except ValueError:
+                            # One malformed chunk must not discard an answer
+                            # that is otherwise arriving fine.
+                            continue
+                        if chunk.get("usage"):
+                            usage = self._usage(chunk)
+                        for choice in chunk.get("choices") or []:
+                            piece = (choice.get("delta") or {}).get("content") or ""
+                            if piece:
+                                parts.append(piece)
+                                if on_token is not None:
+                                    await on_token(piece)
+        except httpx.TimeoutException as exc:
+            raise GridError(
+                f"gateway timed out after {self.timeout_s:.0f}s while writing "
+                f"the answer ({type(exc).__name__})."
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise GridError(f"gateway unreachable: {str(exc) or type(exc).__name__}") from exc
+
+        text = "".join(parts).strip()
+        if not text:
+            raise GridError("gateway streamed no content")
+        return text, usage
 
 
 def _selector_user_msg(question: str, context: str) -> str:

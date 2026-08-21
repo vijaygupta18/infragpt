@@ -164,6 +164,42 @@ async def approve_user(
     return _user_out(storage, user_id)
 
 
+@router.post("/users/{user_id}/role", response_model=UserOut)
+async def set_role(
+    user_id: int,
+    body: ApproveIn,
+    storage: Annotated[Storage, Depends(get_storage)],
+    admin: Annotated[Principal, Depends(require_admin)],
+) -> UserOut:
+    """REPLACE a user's grants with exactly one role's surfaces.
+
+    Distinct from `approve`, which only adds. Adding is right when activating
+    someone, but it cannot express a CHANGE: moving an admin to analytics by
+    granting analytics leaves every admin surface in place, so the demotion
+    silently does nothing. Editing a role has to be able to take access away,
+    which means computing the difference rather than unioning.
+
+    Grants outside the role are revoked. That is the point, and it is why this
+    is a separate endpoint rather than a flag on approve — a caller cannot ask
+    for "add" and get "replace" by accident.
+    """
+    role = BY_KEY.get(body.role)
+    if role is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"unknown role {body.role!r}",
+        )
+    _user_out(storage, user_id)  # 404 before mutating
+
+    wanted = {s.value for s in role.surfaces}
+    held = set(storage.grants.surfaces_for_user(user_id))
+    for surface in sorted(held - wanted):
+        storage.grants.revoke(user_id, surface)
+    for surface in sorted(wanted - held):
+        storage.grants.grant(user_id, surface, admin.email)
+    return _user_out(storage, user_id)
+
+
 @router.post("/users/{user_id}/enable", response_model=UserOut)
 async def enable_user(
     user_id: int,

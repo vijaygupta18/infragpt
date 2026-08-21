@@ -74,6 +74,11 @@ details.role-detail summary:hover { color: var(--ink); }
 .people th:last-child, .people td:last-child { text-align: right; }
 .people td .email { font-family: var(--mono); font-size: .82rem; }
 .rolechips { display: flex; gap: .3rem; flex-wrap: wrap; }
+.row-actions { display: flex; align-items: center; gap: .4rem; justify-content: flex-end; }
+.rolesel { font-size: .78rem; padding: .18rem .4rem; max-width: 9.5rem; }
+@media (max-width: 760px) {
+  .row-actions { flex-wrap: wrap; justify-content: flex-start; }
+}
 .seen { font-family: var(--mono); font-size: .74rem; color: var(--muted); }
 .filter { max-width: 18rem; }
 {% endblock %}
@@ -176,13 +181,29 @@ details.role-detail summary:hover { color: var(--ink); }
         </td>
         <td><span class="seen">{{ u.last_seen_at or '—' }}</span></td>
         <td>
-          {% if u.status == 'active' %}
-          <button class="ghost danger" type="button"
-                  data-disable="{{ u.id }}" data-email="{{ u.email }}">Disable</button>
-          {% elif u.status == 'disabled' %}
-          <button class="ghost" type="button"
-                  data-enable="{{ u.id }}" data-email="{{ u.email }}">Re-enable</button>
-          {% endif %}
+          <div class="row-actions">
+            {# Changing a role has to be possible from the list. It was only
+               offered on the approval card, so a role could be set once, at
+               the moment of approval, and never again — which is the moment
+               you know least about what someone needs. #}
+            <select class="rolesel" data-setrole="{{ u.id }}" data-email="{{ u.email }}"
+                    aria-label="Role for {{ u.email }}">
+              <option value="">Change role…</option>
+              {% for r in roles %}
+              <option value="{{ r.key }}" data-label="{{ r.label }}"
+                      {% if r.label in u.roles and u.roles|length == 1 %}selected{% endif %}>
+                {{ r.label }}
+              </option>
+              {% endfor %}
+            </select>
+            {% if u.status == 'active' %}
+            <button class="ghost danger" type="button"
+                    data-disable="{{ u.id }}" data-email="{{ u.email }}">Disable</button>
+            {% elif u.status == 'disabled' %}
+            <button class="ghost" type="button"
+                    data-enable="{{ u.id }}" data-email="{{ u.email }}">Re-enable</button>
+            {% endif %}
+          </div>
         </td>
       </tr>
       {% endfor %}
@@ -240,7 +261,6 @@ details.role-detail summary:hover { color: var(--ink); }
       var role = opt.value;
       var label = opt.getAttribute('data-label');
       var email = btn.getAttribute('data-email');
-      var label = btn.getAttribute('data-label');
       /* Approving is the one action here that widens access, so it is the one
          that asks. Disable/decline are recoverable; a wrong grant is live. */
       window.confirmModal({
@@ -256,6 +276,37 @@ details.role-detail summary:hover { color: var(--ink); }
           .catch(function (e) {
             busy(btn, false);
             window.alertModal({ title: 'Could not grant that role', body: e.message });
+          });
+      });
+    });
+  });
+
+  /* Changing a role REPLACES what someone holds, so it can take access away.
+     That is the whole point of an editor — but it also means a mis-click is a
+     real change, so it confirms and says plainly what will happen. */
+  document.querySelectorAll('[data-setrole]').forEach(function (sel) {
+    var previous = sel.value;
+    sel.addEventListener('change', function () {
+      var role = sel.value;
+      if (!role) { return; }
+      var opt = sel.options[sel.selectedIndex];
+      var label = opt.getAttribute('data-label');
+      var userId = sel.getAttribute('data-setrole');
+      var email = sel.getAttribute('data-email');
+      window.confirmModal({
+        title: 'Set ' + email + ' to ' + label + '?',
+        body: 'Their access becomes exactly what the ' + label + ' role covers. '
+            + 'Anything they hold outside that role is removed.',
+        confirmLabel: 'Set ' + label
+      }).then(function (ok) {
+        if (!ok) { sel.value = previous; return; }
+        sel.disabled = true;
+        post('/admin/users/' + userId + '/role', { role: role })
+          .then(function () { window.location.reload(); })
+          .catch(function (e) {
+            sel.disabled = false;
+            sel.value = previous;
+            window.alertModal({ title: 'Could not change the role', body: e.message });
           });
       });
     });
