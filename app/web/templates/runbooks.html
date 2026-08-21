@@ -1,0 +1,188 @@
+{% extends "base.html" %}
+{% block title %}infragpt — runbooks{% endblock %}
+
+{% block style %}
+/* Runbooks are the tool's own knowledge, authored here rather than shipped.
+   The editor is deliberately plain: this is a writing surface, and chrome
+   competes with the text. */
+.rb-layout { display: grid; grid-template-columns: 17rem minmax(0,1fr); gap: 2rem; align-items: start; }
+@media (max-width: 900px) { .rb-layout { grid-template-columns: minmax(0,1fr); } }
+
+.rb-list { position: sticky; top: 3.4rem; }
+.rb-list ul { list-style: none; margin: .5rem 0 0; padding: 0; }
+.rb-list li { display: flex; align-items: center; gap: .3rem; }
+.rb-list a {
+  flex: 1; min-width: 0; display: block; padding: .34rem .5rem;
+  border-radius: var(--r-control); color: var(--ink-2); font-size: .85rem;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.rb-list a:hover { background: var(--raised); color: var(--ink); }
+.rb-list a.current { background: var(--raised); color: var(--ink); font-weight: 510; }
+.rb-list .stale { color: var(--aws); font-size: .7rem; font-family: var(--mono); }
+
+.rb-form label.label { display: block; margin: 1rem 0 .3rem; }
+.rb-form input, .rb-form textarea { width: 100%; }
+.rb-form textarea {
+  min-height: 26rem; font-family: var(--mono); font-size: .82rem; line-height: 1.6;
+  resize: vertical;
+}
+.rb-actions { display: flex; align-items: center; gap: .6rem; margin-top: 1rem; }
+.rb-actions .grow { margin-left: auto; }
+.rb-hint { font-size: .8rem; color: var(--muted); line-height: 1.55; margin-top: .4rem; }
+.rb-msg { font-size: .85rem; margin-top: .7rem; }
+.rb-msg.ok { color: var(--ok); }
+.rb-msg.err { color: var(--fail); }
+{% endblock %}
+
+{% block content %}
+<h1>Runbooks</h1>
+<p class="sub">
+  What the assistant knows about <em>this</em> environment — which database holds
+  which data, what a workload is really called, the trap that makes a metric
+  misleading. Retrieved by keyword and put in front of the model with the
+  question, so a good runbook turns "I have no function for that" into an answer.
+</p>
+
+<div class="rb-layout">
+  <aside class="rb-list">
+    <button class="btn primary" type="button" id="rbNew" style="width:100%">New runbook</button>
+    <span class="label" style="display:block;margin:1.1rem 0 .3rem">Existing ({{ runbooks | length }})</span>
+    <ul>
+      {% for rb in runbooks %}
+      <li>
+        <a href="#" data-open="{{ rb.path.stem if rb.path else '' }}" title="{{ rb.name }}">{{ rb.name }}</a>
+        {% if rb.is_stale %}<span class="stale" title="Not reviewed in 180 days">stale</span>{% endif %}
+      </li>
+      {% else %}
+      <li><span class="muted" style="font-size:.85rem">None yet.</span></li>
+      {% endfor %}
+    </ul>
+  </aside>
+
+  <section class="rb-form">
+    <label class="label" for="rbName">Name</label>
+    <input id="rbName" type="text" maxlength="120"
+           placeholder="e.g. Where ride and booking data lives">
+    <p class="rb-hint">
+      Also the filename. Saving under an existing name replaces it, so corrections
+      update in place rather than leaving two runbooks that match the same question.
+    </p>
+
+    <label class="label" for="rbKeywords">Keywords</label>
+    <input id="rbKeywords" type="text" maxlength="400"
+           placeholder="rides, bookings, city, clickhouse, how many">
+    <p class="rb-hint">
+      Comma-separated, and the most important field here — retrieval matches on
+      these. Use the words someone would actually type, including the clumsy ones.
+    </p>
+
+    <label class="label" for="rbBody">Content</label>
+    <textarea id="rbBody" spellcheck="false"
+              placeholder="Which functions answer this class of question, in what order, and what to watch out for.
+
+State the traps: an empty result that means &quot;wrong name&quot; rather than &quot;no problem&quot;, a count that is really a rate, a table that only exists on one side."></textarea>
+
+    <div class="rb-actions">
+      <button class="primary" type="button" id="rbSave">Save runbook</button>
+      <button type="button" id="rbDelete" class="danger" hidden>Delete</button>
+      <span class="grow"></span>
+      <span class="rb-msg" id="rbMsg"></span>
+    </div>
+  </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+/* Built with textContent and value assignment only — a runbook body is
+   arbitrary text and must never be interpreted as markup. */
+(function () {
+  var name = document.getElementById('rbName');
+  var keywords = document.getElementById('rbKeywords');
+  var body = document.getElementById('rbBody');
+  var msg = document.getElementById('rbMsg');
+  var del = document.getElementById('rbDelete');
+  var current = null;
+
+  function say(text, kind) {
+    msg.textContent = text;
+    msg.className = 'rb-msg ' + (kind || '');
+  }
+
+  function load(slug) {
+    fetch('/admin/api/runbooks/' + encodeURIComponent(slug))
+      .then(function (r) { return r.ok ? r.json() : Promise.reject(new Error('not found')); })
+      .then(function (d) {
+        current = slug;
+        name.value = d.name || '';
+        keywords.value = (d.keywords || []).join(', ');
+        body.value = d.body || '';
+        del.hidden = false;
+        say('Loaded' + (d.stale ? ' — not reviewed in 180 days' : ''), d.stale ? 'err' : '');
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      })
+      .catch(function (e) { say(e.message, 'err'); });
+  }
+
+  document.querySelectorAll('[data-open]').forEach(function (a) {
+    a.addEventListener('click', function (e) {
+      e.preventDefault();
+      load(a.getAttribute('data-open'));
+    });
+  });
+
+  document.getElementById('rbNew').addEventListener('click', function () {
+    current = null;
+    name.value = ''; keywords.value = ''; body.value = '';
+    del.hidden = true;
+    say('');
+    name.focus();
+  });
+
+  document.getElementById('rbSave').addEventListener('click', function () {
+    if (!name.value.trim() || !body.value.trim()) {
+      say('A runbook needs a name and some content.', 'err');
+      return;
+    }
+    say('Saving…');
+    fetch('/admin/api/runbooks', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: name.value.trim(),
+        body: body.value,
+        keywords: keywords.value.split(',').map(function (k) { return k.trim(); })
+                                 .filter(Boolean)
+      })
+    }).then(function (r) {
+      return r.json().then(function (d) {
+        if (!r.ok) { throw new Error(d.detail || ('HTTP ' + r.status)); }
+        return d;
+      });
+    }).then(function () {
+      say('Saved. It is live for the next question.', 'ok');
+      setTimeout(function () { window.location.reload(); }, 700);
+    }).catch(function (e) { say(e.message, 'err'); });
+  });
+
+  del.addEventListener('click', function () {
+    if (!current) { return; }
+    window.confirmModal({
+      title: 'Delete this runbook?',
+      body: 'The assistant will lose this context on the next question. '
+          + 'It cannot be recovered from here.',
+      confirmLabel: 'Delete',
+      danger: true
+    }).then(function (ok) {
+      if (!ok) { return; }
+      fetch('/admin/api/runbooks/' + encodeURIComponent(current), { method: 'DELETE' })
+        .then(function (r) {
+          if (!r.ok) { throw new Error('could not delete'); }
+          window.location.reload();
+        })
+        .catch(function (e) { say(e.message, 'err'); });
+    });
+  });
+})();
+</script>
+{% endblock %}

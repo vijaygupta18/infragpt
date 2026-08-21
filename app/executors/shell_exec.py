@@ -31,6 +31,7 @@ point of composing commands rather than selecting them.
 from __future__ import annotations
 
 import asyncio
+import re
 import shlex
 from typing import Any
 
@@ -96,6 +97,23 @@ def _missing_binary(binary: str) -> str:
         f"{base}, and there is no equivalent function. Say so plainly rather "
         f"than retrying — the command cannot succeed here."
     )
+
+
+#: Tools that report an authorisation failure without a non-zero exit code.
+_DENIED_RE = re.compile(
+    r"(?i)(required '[^']+' permission[^\n]*"
+    r"|permission[s]? denied[^\n]*"
+    r"|does not have [a-z.]+ access[^\n]*"
+    r"|caller does not have permission[^\n]*"
+    r"|AccessDenied[^\n]*"
+    r"|is forbidden: [^\n]*)"
+)
+
+
+def _permission_denied(text: str) -> str:
+    """The permission message, if the output contains one. Empty otherwise."""
+    match = _DENIED_RE.search(text or "")
+    return match.group(1).strip()[:160] if match else ""
 
 
 def _explain_exit(binary: str, code: int) -> str:
@@ -171,6 +189,23 @@ class ShellExecutor(Executor):
             )
 
         text = (out or b"").decode(errors="replace")
+
+        # SUCCESS IS NOT ALWAYS SUCCESS. gcloud exits 0 while printing
+        # "WARNING: Some requests did not succeed. - Required '<perm>'
+        # permission" — so a permission failure looks like a clean run that
+        # found nothing. Judged on the exit code alone, "no instances exist"
+        # and "not allowed to list instances" are the same answer, and only one
+        # of them is true. Verified 2026-08-21 against a service account
+        # lacking compute.viewer.
+        denied = _permission_denied(text)
+        if proc.returncode == 0 and denied:
+            return failed(
+                f"the command exited 0 but was DENIED: {denied}. gcloud reports "
+                f"missing permissions as a warning, not an error, so this is a "
+                f"PERMISSIONS gap — not evidence that nothing exists. Say the "
+                f"check could not be made and name the permission."
+            )
+
         if proc.returncode != 0:
             # Keep the tool's own words. "context does not exist", "NotFound",
             # "unknown flag" are precisely what lets the next round self-correct.

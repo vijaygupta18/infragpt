@@ -142,3 +142,65 @@ def test_multiple_pii_classes_in_one_line() -> None:
         assert secret not in out
     # The non-personal context survives, or the output is useless for debugging.
     assert "ERROR booking failed" in out
+
+
+# --- credentials ------------------------------------------------------------
+#
+# Added once the tool could read ConfigMaps, config files and source — the
+# places credentials actually live, as opposed to Secrets, which it cannot
+# reach. Each pattern is asserted to FIRE, because the first version compiled
+# \b into a literal backspace byte and every rule silently matched nothing. A
+# redactor that quietly does nothing is worse than none: you trust it.
+
+
+@pytest.mark.parametrize("raw,leak", [
+    ("password: hunter2sekret", "hunter2sekret"),
+    ("api_key = sk-live-abcdefghij", "sk-live-abcdefghij"),
+    ("client_secret: 'abcd1234efgh'", "abcd1234efgh"),
+    ("Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig", "eyJhbGciOiJ"),
+    ("AKIAIOSFODNN7EXAMPLE", "AKIAIOSFODNN7EXAMPLE"),
+    ("ghp_abcdefghijklmnopqrstuvwx", "ghp_abcdefghijklmnopqrstuvwx"),
+    ("xoxb-1234567890-abcdefghij", "xoxb-1234567890"),
+    ("postgres://app:hunter2@db:5432/x", "hunter2"),
+])
+def test_credentials_never_survive_redaction(raw: str, leak: str) -> None:
+    from app.redactor import redact_text
+
+    assert leak not in redact_text(raw), raw
+
+
+def test_a_private_key_block_is_dropped_whole() -> None:
+    from app.redactor import redact_text
+
+    blob = (
+        "-----BEGIN RSA PRIVATE KEY-----\n"
+        "MIIEowIBAAKCAQEAx7Vv\nabc123\n"
+        "-----END RSA PRIVATE KEY-----"
+    )
+    out = redact_text(blob)
+    assert "MIIEowIBAAKCAQEAx7Vv" not in out
+    assert "PRIVATE-KEY-REDACTED" in out
+
+
+@pytest.mark.parametrize("benign", [
+    "NAME  STATUS  RESTARTS\npod-1  Running  0",
+    "the password_env field names the variable, not the value",
+    "SELECT count(*) FROM rides WHERE city = 'x'",
+    "token_bucket_size = 40",
+])
+def test_ordinary_output_is_left_alone(benign: str) -> None:
+    """Over-redaction destroys the answers this tool exists to give."""
+    from app.redactor import redact_text
+
+    assert redact_text(benign) == benign
+
+
+def test_every_credential_pattern_actually_compiles_to_something_matchable() -> None:
+    """The guard against the \\b-to-backspace bug recurring: a pattern
+    containing a control character can never match real text."""
+    from app import redactor
+
+    for name in dir(redactor):
+        if name.endswith("_RE"):
+            pattern = getattr(redactor, name).pattern
+            assert "\x08" not in pattern, f"{name} contains a literal backspace"

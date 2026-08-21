@@ -48,6 +48,10 @@ class Surface(StrEnum):
     # role by default: it is the widest grant in the system, and the only one
     # whose safety rests on the pod's credentials rather than on a narrow,
     # reviewed catalogue.
+    # Source code — shallow clones of public repositories, read-only. Metrics
+    # say what failed and logs say where; the code says why, and every root
+    # cause worth the name has come from reading it.
+    CODE = "code"
     SHELL_READ = "shell:read"
     ADMIN = "admin"
 
@@ -174,7 +178,7 @@ class RegistryEntry(BaseModel):
         "sql", "redis", "kubectl", "promql",
         "gcpmetric", "gcpalloydb", "gcpmetricsearch", "gcpmetricquery",
         "awsmetric", "awselasticache", "mcp", "shell", "sqlfree", "vmmeta",
-        "gcpinsights",
+        "gcpinsights", "code",
         # ClickHouse, split the same way sql/sqlfree is: `clickhouse` carries a
         # reviewed statement, `clickhousefree` takes the statement as a param.
         "clickhouse", "clickhousefree",

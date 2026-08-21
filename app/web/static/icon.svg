@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
+  <!-- A terminal prompt with a read-only mark. The chevron says "you ask
+       something and it answers"; the dot is the read-only badge that appears
+       beside the wordmark in the app, so the tab icon and the header agree.
+       Theme-aware: the glyph inverts with the viewer's colour scheme so it
+       stays legible on both light and dark browser chrome. -->
+  <style>
+    .bg { fill: #17150f; }
+    .fg { fill: #ece7df; }
+    .ok { fill: #46c88a; }
+    @media (prefers-color-scheme: light) {
+      .bg { fill: #1b1a17; }
+      .fg { fill: #ffffff; }
+      .ok { fill: #3fbf83; }
+    }
+  </style>
+  <rect class="bg" width="32" height="32" rx="7"/>
+  <path class="fg" d="M8.5 10.2 L14.6 16 L8.5 21.8"
+        fill="none" stroke="currentColor" stroke-width="0"
+        style="stroke:#ece7df;stroke-width:2.6;stroke-linecap:round;stroke-linejoin:round"/>
+  <rect class="fg" x="16.4" y="20.2" width="8.2" height="2.5" rx="1.25"/>
+  <circle class="ok" cx="24.5" cy="9.5" r="3"/>
+</svg>

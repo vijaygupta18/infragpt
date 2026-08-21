@@ -589,3 +589,32 @@ def test_a_failed_call_keeps_its_error_intact() -> None:
         ]
     )
     assert "no host configured" in text
+
+
+def test_calls_in_a_round_run_concurrently() -> None:
+    """A round of reads against different backends took the SUM of their
+    latencies for no reason: nothing in a round depends on anything else in it,
+    because the model only sees results at the end of the round. A live question
+    used 14 calls — serially that is 14 latencies stacked inside a 300s budget.
+    """
+    import inspect
+
+    from app.api import ask
+
+    source = inspect.getsource(ask._run_calls)
+    assert "asyncio.gather" in source, "round execution must be concurrent"
+    assert "return_exceptions=True" in source, (
+        "one backend raising must not discard the results that succeeded"
+    )
+
+
+def test_call_order_survives_concurrency() -> None:
+    """Results must read as the sequence the model ASKED for, not the order
+    backends happened to answer in — otherwise the same question renders
+    differently each run and the evidence stops being reproducible."""
+    import inspect
+
+    from app.api import ask
+
+    source = inspect.getsource(ask._run_calls)
+    assert "zip(calls, results" in source

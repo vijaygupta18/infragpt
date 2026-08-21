@@ -23,6 +23,7 @@ from typing import Any
 from app.executors.awsapi import AwsElastiCacheExecutor, AwsMetricExecutor
 from app.executors.base import ExecResult, Executor, ExecutorError
 from app.executors.clickhouse import ClickHouseExecutor
+from app.executors.code import CodeExecutor
 from app.executors.gcpapi import (
     GcpAlloyDbExecutor,
     GcpMetricExecutor,
@@ -64,6 +65,7 @@ class ExecutorRegistry:
             "promql": PromQLExecutor(),
             "vmmeta": VmMetaExecutor(),
             "gcpinsights": GcpInsightsExecutor(),
+            "code": CodeExecutor(),
             "gcpmetric": GcpMetricExecutor(),
             "gcpalloydb": GcpAlloyDbExecutor(),
             "gcpmetricsearch": GcpMetricSearchExecutor(),

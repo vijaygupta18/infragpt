@@ -24,6 +24,18 @@ BACKUP_DIR = DATA_DIR / "backups"
 
 REGISTRY_DIR = Path(os.getenv("INFRAGPT_REGISTRY", "registry"))
 
+#: Shallow clones of PUBLIC source repositories, on the data volume. Read-only,
+#: no credentials — see app/executors/code.py.
+CODE_DIR = Path(os.getenv("INFRAGPT_CODE", str(DATA_DIR / "code")))
+
+#: Repositories to keep cloned, as "name=url". Supplied by config so the
+#: repository list is deployment information rather than something baked in.
+CODE_REPOS = tuple(
+    part.strip()
+    for part in os.getenv("INFRAGPT_CODE_REPOS", "").split(",")
+    if part.strip()
+)
+
 
 @dataclass(frozen=True)
 class PgConnection:

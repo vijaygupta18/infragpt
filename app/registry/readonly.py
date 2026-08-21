@@ -277,6 +277,10 @@ def assert_read_only(entry: RegistryEntry) -> None:
         _check_clickhouse(entry)
     elif kind == "shell":
         _check_shell(entry)
+    elif kind == "code":
+        # Reads bytes from a clone on disk. There is no write, checkout or
+        # execute path in the executor at all.
+        return
     elif kind == "gcpinsights":
         # Read-only Cloud Monitoring queries against a fixed metric table.
         return

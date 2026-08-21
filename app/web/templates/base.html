@@ -4,6 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{% block title %}infragpt{% endblock %}</title>
+<!-- SVG favicon, theme-aware. No PNG fallback: every browser that can run this
+     app supports SVG icons, and shipping a raster copy means two files to keep
+     in step for no gain. -->
+<link rel="icon" type="image/svg+xml" href="/static/icon.svg">
 {# Styles inlined; fonts served same-origin from /static. No CDN anywhere. #}
 <style>
 /* ---------------------------------------------------------------------------
@@ -424,6 +428,7 @@ dialog.modal button.danger:hover:not(:disabled) { background: var(--fail); filte
     <a href="/" {% if path == '/' or path.startswith('/c/') %}class="active"{% endif %}>Ask</a>
     {% if is_admin %}
     <a href="/admin" {% if path == '/admin' %}class="active"{% endif %}>People</a>
+    <a href="/admin/runbooks" {% if path == '/admin/runbooks' %}class="active"{% endif %}>Runbooks</a>
     <a href="/admin/audit-log" {% if path == '/admin/audit-log' %}class="active"{% endif %}>Audit</a>
     {% endif %}
   </nav>

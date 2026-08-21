@@ -37,167 +37,97 @@ class Role:
 
 
 ROLES: tuple[Role, ...] = (
+    # THREE ROLES, deliberately.
+    #
+    # There were seven, arranged in a ladder with two side roles. It was a finer
+    # model than anyone actually uses: approvers do not know whether a new
+    # joiner is "Support" or "Engineer", so they pick the larger one, and the
+    # extra granularity buys nothing while making every grant a small decision.
+    #
+    # The split that survives is the one people can answer instantly: does this
+    # person work on INFRASTRUCTURE, on DATA, or do they run the tool?
     Role(
-        key="viewer",
-        label="Viewer",
-        summary="Service health and dashboards. The safe default for anyone new.",
-        surfaces=(Surface.METRICS,),
-        grants_you=(
-            "Error rates, latency and saturation for any service",
-            "Cluster and database capacity metrics",
-        ),
-        order=10,
-        tags=("safe-default",),
-    ),
-    Role(
-        key="support",
-        label="Support",
-        summary="Answer 'is it us or is it them' without touching infrastructure.",
-        surfaces=(Surface.METRICS, Surface.LOGS),
-        grants_you=(
-            "Everything Viewer covers",
-            "Application logs, searchable by service and time",
-        ),
-        caution=(
-            "Logs can contain personal data. It is redacted before display — "
-            "phone numbers hashed, coordinates coarsened — but this is the first "
-            "role where user data is in scope at all."
-        ),
-        order=20,
-    ),
-    Role(
-        key="engineer",
-        label="Engineer",
-        summary=(
-            "Full read-only debugging across both clouds. "
-            "The working default for the infra team."
-        ),
+        key="infra",
+        label="Infra",
+        summary="Read everything about how the platform is running.",
         surfaces=(
             Surface.METRICS,
             Surface.LOGS,
             Surface.K8S_GCP,
             Surface.K8S_AWS,
-            Surface.DB_READ,
             Surface.REDIS_READ,
             Surface.CLOUD_GCP,
             Surface.CLOUD_AWS,
-        ),
-        grants_you=(
-            "Everything Support covers",
-            "Pods, logs, events and workloads in both clusters",
-            "Database schema, indexes and performance metadata",
-            "Redis key lookups in either cloud",
-            "Cloud capacity: AlloyDB, GKE, ElastiCache",
-        ),
-        caution=(
-            "Redis is the one surface where read-only is enforced by this "
-            "application rather than by the credential, because Redis AUTH has no "
-            "read-only user. Weigh that before granting it broadly."
-        ),
-        order=30,
-    ),
-    Role(
-        key="analyst",
-        label="Analyst",
-        summary="Query business data in ClickHouse. Separate from infra debugging on purpose.",
-        surfaces=(Surface.METRICS, Surface.ANALYTICS),
-        grants_you=(
-            "Everything Viewer covers",
-            "Read queries against ClickHouse, including ride and business data",
-            "ClickHouse schema and cluster health — tables, columns, parts, disks",
-        ),
-        caution=(
-            "This is the only role that returns real business data. It is "
-            "deliberately not bundled with Engineer: needing to debug a cluster "
-            "is not a reason to be able to read customer records."
-        ),
-        order=40,
-        tags=("pii",),
-    ),
-    Role(
-        key="casework",
-        label="Casework",
-        summary=(
-            "Look up one named driver or rider. For working a ticket, not for "
-            "debugging infrastructure."
-        ),
-        # Deliberately OFF the Viewer -> Support -> Engineer -> Admin ladder,
-        # for the same reason Analyst is. Those roles nest, so anything added to
-        # Support silently lands in Engineer too — and "I debug the cluster" is
-        # not a reason to be able to read a driver's record. Someone who works
-        # tickets gets this role explicitly, in addition to whichever ladder
-        # role they hold.
-        surfaces=(Surface.METRICS, Surface.DB_ENTITY),
-        grants_you=(
-            "Everything Viewer covers",
-            "Curated lookups for a single driver or rider — account and "
-            "subscription flags, blocking reasons, recent payment state",
-        ),
-        caution=(
-            "This returns one real person's records. Lookups are by hashed "
-            "phone number or id, are capped to a single subject, and every one "
-            "is written to the audit log with the identifier used."
-        ),
-        order=45,
-        tags=("pii",),
-    ),
-    Role(
-        key="operator",
-        label="Operator",
-        summary="Engineer, plus composing read-only commands when no function fits.",
-        surfaces=(
-            Surface.METRICS,
-            Surface.LOGS,
-            Surface.K8S_GCP,
-            Surface.K8S_AWS,
             Surface.DB_READ,
-            Surface.REDIS_READ,
-            Surface.CLOUD_GCP,
-            Surface.CLOUD_AWS,
+            Surface.CODE,
             Surface.SHELL_READ,
         ),
         grants_you=(
-            "Everything Engineer covers",
-            "Running read-only kubectl, gcloud, aws, psql, redis-cli and curl "
-            "commands it writes itself, when no registered function fits",
+            "Metrics, logs, Kubernetes, caches and cloud control planes",
+            "Database health — indexes, locks, replication, live queries",
+            "The source code, to explain WHY an error happens",
+            "Running read-only commands it composes when no function fits",
         ),
         caution=(
-            "The widest grant here. Every other surface is a fixed catalogue "
-            "someone reviewed; this one lets the assistant compose commands. It "
-            "still cannot write — the pod holds viewer-only cloud roles, a "
-            "get/list/watch ServiceAccount and a SELECT-only database role — but "
-            "it can read anything those credentials can reach, and it is the one "
-            "grant whose safety rests on the credentials rather than on a "
-            "reviewed list."
+            "Includes db:read, which is database METADATA only — schema, "
+            "indexes, statistics — and cannot reach application rows. It also "
+            "includes self-composed read commands, which is the widest single "
+            "capability here; everything it can reach is still bounded by "
+            "read-only credentials."
         ),
-        order=50,
-        tags=("wide",),
+        order=10,
+    ),
+    Role(
+        key="analytics",
+        label="Analytics",
+        summary="Query the data itself — rides, bookings, and per-person records.",
+        surfaces=(
+            Surface.ANALYTICS,
+            Surface.DB_READ,
+            Surface.DB_ENTITY,
+            Surface.METRICS,
+        ),
+        grants_you=(
+            "ClickHouse — ride, booking and event data",
+            "Database schema, indexes and statistics",
+            "Per-subject lookups for one driver or rider at a time",
+        ),
+        caution=(
+            "This role returns REAL PEOPLE'S DATA. Per-subject lookups are "
+            "capped to a single identified subject and every one is written to "
+            "the audit log with the identifier used — but this is the role "
+            "where customer records are in scope at all."
+        ),
+        order=20,
+        tags=("pii",),
     ),
     Role(
         key="admin",
         label="Admin",
-        summary="Everything, plus approving people and reading the audit log.",
-        surfaces=(
-            Surface.ADMIN,
-            Surface.METRICS,
-            Surface.LOGS,
-            Surface.K8S_GCP,
-            Surface.K8S_AWS,
-            Surface.DB_READ,
-            Surface.REDIS_READ,
-            Surface.CLOUD_GCP,
-            Surface.CLOUD_AWS,
-            Surface.DB_ENTITY,
-        ),
+        summary="Everything, plus approving people and assigning roles.",
+        # DERIVED from the enum, not hand-listed. The list previously said
+        # "Everything" while omitting two surfaces, so an admin asking an
+        # analytics question was told no function existed — a confusing refusal
+        # for someone who could grant it to themselves in the next click.
+        #
+        # Withholding a surface from Admin was never a security boundary: this
+        # role widens its own access by definition. It only made the product lie
+        # about itself, and drift every time a surface was added.
+        surfaces=tuple(Surface),
         grants_you=(
-            "Everything Engineer covers",
-            "Approve and disable accounts, and change what others can see",
+            "Everything Infra and Analytics cover, together",
+            "Approve and disable accounts, and assign roles",
             "The full audit log",
         ),
-        caution="Admins can widen their own access. Keep this list short.",
-        order=90,
+        caution=(
+            "Total read access, including real people's records, plus the "
+            "ability to widen anyone else's. Keep the number of admins small — "
+            "that, not a short surface list, is the control."
+        ),
+        order=30,
     ),
 )
+
 
 BY_KEY: dict[str, Role] = {r.key: r for r in ROLES}
 

@@ -23,6 +23,7 @@ from app.access.roles import ROLES, infer_roles
 from app.audit import read_audit
 from app.auth.deps import DISABLED_MESSAGE, PENDING_MESSAGE, Principal, current_principal
 from app.registry.schema import Surface
+from app.runbooks import get_runbooks
 from app.storage import Storage, get_storage
 from app.web import render
 
@@ -243,5 +244,36 @@ async def admin_audit_log(
                 "kind": kind,
                 "limit": limit,
             },
+        },
+    )
+
+
+@router.get("/admin/runbooks", response_class=HTMLResponse)
+async def admin_runbooks(
+    request: Request,
+    principal: Annotated[Principal, Depends(current_principal)],
+) -> HTMLResponse:
+    """Author the tool's own knowledge.
+
+    This is where environment-specific context belongs: which database holds
+    rides, what a workload is really called, the trap that makes a metric
+    misleading. It is what turns a correct-but-useless "I have no function for
+    that" into an answer — and it is exactly the material that must not be
+    committed to a published repository, which is why it lives on the volume
+    rather than in git.
+    """
+    blocked = _gate_admin(request, principal)
+    if blocked is not None:
+        return blocked
+
+    store = get_runbooks(reload=True)
+    return render(
+        request,
+        "runbooks.html",
+        {
+            "principal": principal,
+            "is_admin": True,
+            "runbooks": sorted(store.all(), key=lambda r: r.name.lower()),
+            "surfaces": [s.value for s in Surface],
         },
     )

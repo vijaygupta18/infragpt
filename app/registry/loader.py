@@ -58,6 +58,8 @@ _PAYLOAD_FIELD: dict[str, str] = {
     # fixed in the executor because getting it wrong returns an empty result
     # that reads as "no slow queries".
     "gcpinsights": "metric",
+    # The operation name (read/search/find/repos); paths and queries are params.
+    "code": "metric",
     "awselasticache": "",
     # The command is a PARAM, not a field on the entry — so there is nothing to
     # validate at load time. app/shell/guard.py checks every command at
@@ -94,6 +96,8 @@ def _known_targets(kind: str) -> set[str]:
             return set(config.K8S_CONNECTIONS)
         case "promql" | "vmmeta":
             return {METRICS_TARGET}
+        case "code":
+            return {"local"}
         case "gcpmetric" | "gcpalloydb" | "gcpmetricsearch" | "gcpmetricquery" | "gcpinsights":
             return set(config.GCP_CONNECTIONS)
         case "awsmetric" | "awselasticache":
@@ -269,6 +273,7 @@ def _check_surface(entry: RegistryEntry) -> None:
         "gcpmetricsearch": {Surface.CLOUD_GCP},
         "gcpmetricquery": {Surface.CLOUD_GCP},
         "gcpinsights": {Surface.CLOUD_GCP},
+        "code": {Surface.CODE},
         "awsmetric": {Surface.CLOUD_AWS},
         "awselasticache": {Surface.CLOUD_AWS},
         "shell": {Surface.SHELL_READ},

@@ -422,11 +422,22 @@ async def _run_calls(
 ) -> None:
     """Execute one round of selected calls, appending to `calls_out`.
 
+    Calls in a round run CONCURRENTLY. They were serial, and a round of five
+    reads that each wait on a different backend took the sum of five round trips
+    for no reason — nothing in a round depends on anything else in it, because
+    the model only learns the results at the end of the round. A live question
+    used 14 calls; serially that is 14 latencies stacked inside a 300s budget.
+
+    Order is preserved regardless of completion order: the evidence and the UI
+    read as the sequence the model asked for, not the order backends happened to
+    answer in, which would make the same question look different each run.
+
     Every call is audited, and a failure is recorded as a failed ToolCallOut
-    rather than raised — the synthesizer must see failures, not be shielded
+    rather than raised — the synthesiser must see failures, not be shielded
     from them.
     """
-    for call in calls:
+
+    async def _one(call: Any) -> ToolCallOut:
         call_started = time.monotonic()
         result = await dispatch(call.name, call.arguments, granted_surfaces=surfaces)
 
@@ -440,17 +451,6 @@ async def _run_calls(
                 target = ""
 
         out_text = result.text or _rows_to_text(result.rows)
-        calls_out.append(
-            ToolCallOut(
-                entry_name=call.name,
-                params=call.arguments,
-                target=target,
-                cloud=str(cloud) if cloud else None,
-                ok=result.ok,
-                error=result.error,
-                output=out_text,
-            )
-        )
         audit.audit_call(
             user_email=email,
             conversation_id=conversation_id,
@@ -471,6 +471,33 @@ async def _run_calls(
             chars=len(out_text or ""),
             duration_ms=int((time.monotonic() - call_started) * 1000),
         )
+        return ToolCallOut(
+            entry_name=call.name,
+            params=call.arguments,
+            target=target,
+            cloud=str(cloud) if cloud else None,
+            ok=result.ok,
+            error=result.error,
+            output=out_text,
+        )
+
+    # return_exceptions: one backend raising must not discard the results of
+    # the calls that succeeded alongside it.
+    results = await asyncio.gather(*(_one(c) for c in calls), return_exceptions=True)
+    for call, outcome in zip(calls, results, strict=True):
+        if isinstance(outcome, BaseException):
+            calls_out.append(
+                ToolCallOut(
+                    entry_name=call.name,
+                    params=call.arguments,
+                    target="",
+                    ok=False,
+                    error=f"{type(outcome).__name__}: {outcome}"[:300],
+                    output="",
+                )
+            )
+        else:
+            calls_out.append(outcome)
 
 
 def _rows_to_text(rows: list[dict[str, Any]]) -> str:

@@ -338,3 +338,44 @@ def test_bq_query_is_refused_because_it_can_also_write() -> None:
     given a command, not parsed SQL — so it cannot tell them apart."""
     with pytest.raises(CommandRefused, match="DML"):
         check(shlex.split("bq query 'SELECT 1'"))
+
+
+# --- success is not always success ------------------------------------------
+
+
+def test_gcloud_permission_warning_on_exit_zero_is_treated_as_failure() -> None:
+    """gcloud prints missing permissions as a WARNING and exits 0.
+
+    Judged on the exit code alone, "no instances exist" and "not allowed to
+    list instances" are the same answer, and only one is true. Verified against
+    a service account lacking compute.viewer on 2026-08-21 — a check that read
+    the exit code reported OK while the command returned nothing.
+    """
+    from app.executors.shell_exec import _permission_denied
+
+    out = (
+        "WARNING: Some requests did not succeed.\n"
+        " - Required 'compute.instances.list' permission for 'projects/x'\n"
+    )
+    detail = _permission_denied(out)
+    assert "compute.instances.list" in detail
+
+
+@pytest.mark.parametrize("out", [
+    "Error from server (Forbidden): pods is forbidden: User cannot list",
+    "An error occurred (AccessDenied) when calling the DescribeInstances operation",
+    "caller does not have permission to access this resource",
+    "PERMISSION DENIED: missing role",
+])
+def test_other_authorisation_failures_are_recognised(out: str) -> None:
+    from app.executors.shell_exec import _permission_denied
+
+    assert _permission_denied(out), out
+
+
+def test_ordinary_output_is_not_mistaken_for_a_denial() -> None:
+    """False positives would turn working commands into reported failures."""
+    from app.executors.shell_exec import _permission_denied
+
+    assert _permission_denied("NAME  STATUS\npod-1  Running") == ""
+    assert _permission_denied("") == ""

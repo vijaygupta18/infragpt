@@ -32,6 +32,10 @@
 /* A list, not a grid of cards. Roles are ordered least to most privileged and
    read top-down, so a row is the honest shape — a grid implies they are peers
    and leaves an orphan when the count is odd. */
+.role-pick { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; margin-top: .6rem; }
+.role-pick select { min-width: 16rem; }
+.role-why { flex-basis: 100%; margin: .35rem 0 0; font-size: .82rem; color: var(--muted); line-height: 1.5; }
+.role-why.caution { color: var(--aws); }
 .roles { border-top: 1px solid var(--line); }
 .role {
   display: grid; grid-template-columns: 7rem 1fr auto; gap: .9rem;
@@ -99,18 +103,28 @@ details.role-detail summary:hover { color: var(--ink); }
         <span class="req-when">first seen {{ u.created_at }}</span>
       </div>
 
-      <div class="roles">
-        {% for r in roles %}
-        <button class="role {% if r.caution %}caution{% endif %}"
-                type="button"
-                data-user="{{ u.id }}" data-role="{{ r.key }}"
-                data-label="{{ r.label }}" data-email="{{ u.email }}">
-          <span class="name">{{ r.label }}</span>
-          <span class="why">{{ r.summary }}</span>
-          <span class="count">{{ r.surfaces|length }} surface{{ '' if r.surfaces|length == 1 else 's' }}</span>
-          {% if r.caution %}<span class="warn">{{ r.caution }}</span>{% endif %}
-        </button>
-        {% endfor %}
+      {# A dropdown rather than a button per role. With three roles the buttons
+         were wider than the decision: an approver picks one, and a row of
+         cards invites reading four paragraphs to choose between three things.
+         The chosen role's own caution is shown BELOW the select, so the
+         consequence appears at the moment of choosing rather than in a panel
+         nobody opens. #}
+      <div class="role-pick">
+        <label class="label" for="role-{{ u.id }}">Role</label>
+        <select id="role-{{ u.id }}" data-rolepick="{{ u.id }}" data-email="{{ u.email }}">
+          {% for r in roles %}
+          <option value="{{ r.key }}"
+                  data-label="{{ r.label }}"
+                  data-summary="{{ r.summary }}"
+                  data-caution="{{ r.caution }}"
+                  data-count="{{ r.surfaces|length }}">
+            {{ r.label }} — {{ r.surfaces|length }} surface{{ '' if r.surfaces|length == 1 else 's' }}
+          </option>
+          {% endfor %}
+        </select>
+        <button class="primary" type="button"
+                data-approve="{{ u.id }}" data-email="{{ u.email }}">Approve</button>
+        <p class="role-why" data-why="{{ u.id }}"></p>
       </div>
 
       <details class="role-detail">
@@ -202,8 +216,29 @@ details.role-detail summary:hover { color: var(--ink); }
     else if (btn.dataset.was) { btn.textContent = btn.dataset.was; }
   }
 
-  document.querySelectorAll('[data-role]').forEach(function (btn) {
+  /* Keep the consequence next to the control: changing the selection updates
+     the description immediately, so an approver sees what they are granting
+     before clicking rather than after. */
+  document.querySelectorAll('[data-rolepick]').forEach(function (sel) {
+    var why = document.querySelector('[data-why="' + sel.getAttribute('data-rolepick') + '"]');
+    function describe() {
+      var opt = sel.options[sel.selectedIndex];
+      if (!why || !opt) { return; }
+      var caution = opt.getAttribute('data-caution');
+      why.textContent = opt.getAttribute('data-summary') + (caution ? '  ' + caution : '');
+      why.className = 'role-why' + (caution ? ' caution' : '');
+    }
+    sel.addEventListener('change', describe);
+    describe();
+  });
+
+  document.querySelectorAll('[data-approve]').forEach(function (btn) {
     btn.addEventListener('click', function () {
+      var userId = btn.getAttribute('data-approve');
+      var sel = document.querySelector('[data-rolepick="' + userId + '"]');
+      var opt = sel.options[sel.selectedIndex];
+      var role = opt.value;
+      var label = opt.getAttribute('data-label');
       var email = btn.getAttribute('data-email');
       var label = btn.getAttribute('data-label');
       /* Approving is the one action here that widens access, so it is the one
@@ -216,8 +251,7 @@ details.role-detail summary:hover { color: var(--ink); }
       }).then(function (ok) {
         if (!ok) { return; }
         busy(btn, true);
-        post('/admin/users/' + btn.getAttribute('data-user') + '/approve',
-             { role: btn.getAttribute('data-role') })
+        post('/admin/users/' + userId + '/approve', { role: role })
           .then(function () { window.location.reload(); })
           .catch(function (e) {
             busy(btn, false);

@@ -16,6 +16,13 @@ from app.access.roles import BY_KEY, ROLES
 from app.audit import read_audit
 from app.auth.deps import Principal, require_admin
 from app.registry.schema import Surface
+from app.runbooks import (
+    RunbookError,
+    delete_runbook,
+    get_runbooks,
+    save_runbook,
+    slugify,
+)
 from app.storage import Storage, get_storage
 
 router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(require_admin)])
@@ -183,3 +190,104 @@ async def list_roles(
         }
         for r in sorted(ROLES, key=lambda r: r.order)
     ]
+
+
+# --- runbooks ---------------------------------------------------------------
+#
+# The only write path in this application, and it writes TEXT to the tool's own
+# volume — never to infrastructure. See app/runbooks/__init__.py for why the
+# exception is deliberate: environment knowledge is what makes answers good and
+# is exactly what must not be committed to a published repository.
+
+
+class RunbookIn(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    body: str = Field(min_length=1)
+    keywords: list[str] = Field(default_factory=list)
+    surfaces: list[str] = Field(default_factory=list)
+    functions: list[str] = Field(default_factory=list)
+
+
+class RunbookOut(BaseModel):
+    slug: str
+    name: str
+    keywords: list[str]
+    surfaces: list[str]
+    functions: list[str]
+    owner: str
+    reviewed_on: str | None
+    stale: bool
+    chars: int
+
+
+def _as_out(rb: Any) -> RunbookOut:
+    return RunbookOut(
+        slug=rb.path.stem if rb.path else slugify(rb.name),
+        name=rb.name,
+        keywords=list(rb.keywords),
+        surfaces=list(rb.surfaces),
+        functions=list(rb.functions),
+        owner=rb.owner,
+        reviewed_on=rb.reviewed_on.isoformat() if rb.reviewed_on else None,
+        stale=rb.is_stale,
+        chars=len(rb.body),
+    )
+
+
+@router.get("/api/runbooks", response_model=list[RunbookOut])
+async def list_runbooks(
+    principal: Annotated[Principal, Depends(require_admin)],
+) -> list[RunbookOut]:
+    return [_as_out(rb) for rb in get_runbooks(reload=True).all()]
+
+
+@router.get("/api/runbooks/{slug}")
+async def read_runbook(
+    slug: str,
+    principal: Annotated[Principal, Depends(require_admin)],
+) -> dict[str, Any]:
+    for rb in get_runbooks(reload=True).all():
+        if rb.path and rb.path.stem == slug:
+            return {**_as_out(rb).model_dump(), "body": rb.body}
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="no such runbook")
+
+
+@router.post("/api/runbooks", response_model=RunbookOut)
+async def upsert_runbook(
+    payload: RunbookIn,
+    principal: Annotated[Principal, Depends(require_admin)],
+) -> RunbookOut:
+    """Create or replace a runbook. The slug is derived from the name, so
+    saving under the same name updates in place rather than accumulating
+    near-duplicates that all match the same question."""
+    try:
+        save_runbook(
+            name=payload.name,
+            body=payload.body,
+            keywords=payload.keywords,
+            surfaces=payload.surfaces,
+            functions=payload.functions,
+            owner=principal.email,
+        )
+    except RunbookError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+        ) from exc
+    for rb in get_runbooks(reload=True).all():
+        if rb.name == payload.name:
+            return _as_out(rb)
+    raise HTTPException(status_code=500, detail="saved but could not be read back")
+
+
+@router.delete("/api/runbooks/{slug}")
+async def remove_runbook(
+    slug: str,
+    principal: Annotated[Principal, Depends(require_admin)],
+) -> dict[str, bool]:
+    try:
+        removed = delete_runbook(slug)
+    except RunbookError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not removed:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="no such runbook")
+    return {"deleted": True}

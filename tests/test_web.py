@@ -216,12 +216,17 @@ def test_admin_console_lists_pending_queue_and_surfaces(client, admin) -> None:
     assert resp.status_code == 200
     # Assert structure, not copy — wording is design material and will change.
     assert "waiting@example.com" in resp.text
-    assert 'data-role="engineer"' in resp.text   # role-based granting is offered
-    assert 'data-role="viewer"' in resp.text
+    # Role granting is offered as a DROPDOWN, not a button per role: with three
+    # roles the cards were wider than the decision they supported.
+    assert 'data-rolepick=' in resp.text
+    for key in ("infra", "analytics", "admin"):
+        assert f'value="{key}"' in resp.text, key
+    assert "data-approve=" in resp.text
+    assert 'data-rolepick=' in resp.text
     # Every role must be offered — an admin should never have to leave this
     # screen to work out how to grant the access someone needs.
     for role in ROLES:
-        assert f'data-role="{role.key}"' in resp.text
+        assert f'value="{role.key}"' in resp.text, role.key
 
 
 def test_admin_console_shows_existing_grants(client, admin) -> None:
@@ -838,3 +843,129 @@ def test_modal_text_is_set_with_textcontent_only(client, member) -> None:
     modal = body[body.index("window.confirmModal") - 3000 : body.index("window.confirmModal")]
     assert "innerHTML" not in modal
     assert "textContent" in modal
+
+
+# --- conversations are per-user ---------------------------------------------
+
+
+def test_one_user_cannot_open_anothers_conversation(client, member) -> None:
+    """Chat history is private to the person who asked.
+
+    A conversation carries the questions someone thought worth asking about
+    production, which is itself sensitive — and the answers embed real output.
+    Ownership is checked on read, not merely on listing, because a guessable
+    integer id is not access control.
+    """
+    storage = get_storage()
+    other = storage.users.get_or_create("someone.else@example.com", "Other")
+    theirs = storage.conversations.create(other.id)
+    storage.conversations.add_message(theirs.id, "user", "their private question")
+
+    resp = client.get(f"/c/{theirs.id}", headers=member)
+    # 200 with the conversation simply NOT LOADED, deliberately: a 403 would
+    # confirm the id exists, so someone else's conversation is made
+    # indistinguishable from a missing one. What matters is that no content
+    # crosses, and that the page does not act as an enumeration oracle.
+    assert resp.status_code == 200
+    assert "their private question" not in resp.text
+    assert f'/c/{theirs.id}' not in resp.text
+
+
+def test_the_sidebar_only_lists_your_own_conversations(client, member) -> None:
+    storage = get_storage()
+    other = storage.users.get_or_create("someone.else2@example.com", "Other")
+    theirs = storage.conversations.create(other.id)
+    storage.conversations.add_message(theirs.id, "user", "not yours to see")
+
+    body = client.get("/", headers=member).text
+    assert "not yours to see" not in body
+    assert f'href="/c/{theirs.id}"' not in body
+
+
+def test_you_cannot_delete_someone_elses_conversation(client, member) -> None:
+    storage = get_storage()
+    other = storage.users.get_or_create("someone.else3@example.com", "Other")
+    theirs = storage.conversations.create(other.id)
+
+    resp = client.delete(f"/conversations/{theirs.id}", headers=member)
+    assert resp.status_code in (403, 404)
+    assert storage.conversations.get(theirs.id) is not None, "it must still exist"
+
+
+# --- runbook authoring ------------------------------------------------------
+
+
+def test_admins_can_create_and_retrieve_a_runbook(client, admin) -> None:
+    r = client.post("/admin/api/runbooks", headers=admin, json={
+        "name": "Where ride data lives",
+        "body": "Ride counts come from the analytics warehouse, not Postgres.",
+        "keywords": ["rides", "how many"],
+    })
+    assert r.status_code == 200, r.text
+    slug = r.json()["slug"]
+
+    got = client.get(f"/admin/api/runbooks/{slug}", headers=admin)
+    assert got.status_code == 200
+    assert "analytics warehouse" in got.json()["body"]
+
+
+def test_a_saved_runbook_is_retrievable_by_a_question(client, admin) -> None:
+    """The point of the feature: a runbook must reach the model on the next
+    question, not after a restart."""
+    from app.runbooks import get_runbooks
+
+    client.post("/admin/api/runbooks", headers=admin, json={
+        "name": "Drainer triage note",
+        "body": "Check drainer_stopped before drainer_throughput.",
+        "keywords": ["drainer", "stopped"],
+    })
+    hits = get_runbooks(reload=True).retrieve("is the drainer stopped?")
+    assert any("Drainer triage" in rb.name for rb in hits)
+
+
+def test_a_runbook_name_cannot_escape_the_directory(client, admin) -> None:
+    """The filename is DERIVED from the title, never taken from the caller —
+    a user-supplied path is a traversal question with no reason to be asked."""
+    from app import config
+
+    r = client.post("/admin/api/runbooks", headers=admin, json={
+        "name": "../../etc/passwd",
+        "body": "attempted traversal",
+        "keywords": [],
+    })
+    assert r.status_code == 200
+    written = list(config.RUNBOOK_DIR.glob("*.md"))
+    assert all(p.parent == config.RUNBOOK_DIR for p in written)
+    assert not (config.RUNBOOK_DIR.parent / "etc").exists()
+
+
+def test_a_non_admin_cannot_author_runbooks(client, member) -> None:
+    """Runbooks steer every answer the tool gives. Writing one is an admin act."""
+    r = client.post("/admin/api/runbooks", headers=member, json={
+        "name": "sneaky", "body": "x", "keywords": [],
+    })
+    assert r.status_code in (401, 403)
+
+
+def test_an_empty_runbook_is_refused_with_a_reason(client, admin) -> None:
+    r = client.post("/admin/api/runbooks", headers=admin, json={
+        "name": "Empty", "body": "   ", "keywords": [],
+    })
+    assert r.status_code == 422 or r.status_code == 400
+
+
+def test_runbooks_page_renders_for_admins(client, admin) -> None:
+    body = client.get("/admin/runbooks", headers=admin).text
+    assert "Runbooks" in body
+    assert 'id="rbSave"' in body
+
+
+def test_the_favicon_is_served_and_linked(client, member) -> None:
+    """A tab icon is how someone finds this among twenty open tabs."""
+    body = client.get("/", headers=member).text
+    assert 'rel="icon"' in body
+    assert "/static/icon.svg" in body
+
+    icon = client.get("/static/icon.svg")
+    assert icon.status_code == 200
+    assert "svg" in icon.headers.get("content-type", "")

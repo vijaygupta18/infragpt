@@ -66,3 +66,19 @@ def _clear_auth_throttles() -> None:
 
     for throttle in (LOGIN_THROTTLE, REGISTER_THROTTLE):
         throttle._hits.clear()  # noqa: SLF001 - test-only reset of module state
+
+
+@pytest.fixture(autouse=True)
+def _isolated_runbook_dir(tmp_path_factory, monkeypatch):
+    """Point runbook writes at a temp directory.
+
+    Runbook authoring is the one write path in the application. Without this a
+    test would either fail against a read-only /data or, worse, succeed and
+    write into the repository's own runbooks/ — leaving fixture text that ships
+    to production in the next image.
+    """
+    from app import config
+
+    directory = tmp_path_factory.mktemp("runbooks")
+    monkeypatch.setattr(config, "RUNBOOK_DIR", directory)
+    yield directory

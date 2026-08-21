@@ -233,3 +233,33 @@ entries:
           LIMIT 100
     row_limit: 500
     timeout_s: 25
+
+  - name: ch_databases
+    surface: analytics
+    kind: clickhouse
+    tags: [heavy]
+    description: >-
+      List the DATABASES in ClickHouse, with table and row counts. START HERE
+      for any data question.
+
+      Observed live: asked for a ride count, the assistant looked only in the
+      connection's default database, found observability tables with zero rows,
+      and reported that no ride data exists. It does — in a different database.
+      The default database is where a connection lands, not where the data is.
+
+      Business data lives in its own databases, one per application side, and
+      the row counts here make it obvious which: the interesting ones hold
+      billions of rows, the default typically holds none. Pick the database from
+      this list, then use ch_tables to find the table.
+    target: ch_prod
+    sql: >-
+      SELECT database,
+             count() AS tables,
+             sum(total_rows) AS rows
+      FROM system.tables
+      WHERE database NOT IN ('system', 'INFORMATION_SCHEMA', 'information_schema')
+      GROUP BY database
+      ORDER BY rows DESC
+    params: {}
+    row_limit: 60
+    timeout_s: 25

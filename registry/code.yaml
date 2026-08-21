@@ -1,0 +1,151 @@
+# infragpt registry — SOURCE CODE.
+#
+# Metrics say WHAT is failing. Logs say WHERE. The code says WHY — and "why" is
+# the only one of the three that ends an investigation.
+#
+# The clones are shallow copies of PUBLIC repositories on the data volume. No
+# credentials are involved, nothing is checked out or executed, and every path
+# is resolved and proven to stay inside the clone root before a byte is read.
+#
+# USE THIS AFTER the logs, not instead of them. An exception message or an error
+# constant from a log line is the search term that makes this precise; without
+# one you are grepping a large tree by guesswork.
+
+entries:
+  - name: code_search
+    surface: code
+    kind: code
+    metric: search
+    description: >-
+      Search the source for a literal string — an error constant, a function
+      name, a message fragment taken from a log line. THE STEP THAT EXPLAINS AN
+      ERROR: a log gives you `E500 SEARCH_TRY_NOT_FOUND`, and this finds where
+      that is raised and what it means.
+
+      Search for the SHORTEST distinctive fragment. Exception text is often
+      assembled from pieces at runtime, so the whole message frequently appears
+      nowhere in the source while a distinctive middle fragment appears exactly
+      once.
+
+      NO MATCHES means the text is absent, NOT that the behaviour is. Try a
+      shorter fragment, different casing, or regex=true before concluding
+      anything.
+    target: local
+    params:
+      query:
+        type: statement
+        required: true
+        max_length: 200
+        description: >-
+          Literal text by default, e.g. `SEARCH_TRY_NOT_FOUND` or
+          `updateOneWithKV`. Set regex=true to treat it as a pattern.
+      path:
+        type: string
+        required: false
+        max_length: 200
+        description: >-
+          Restrict to a subtree, e.g. `<repo>/path/to/subtree`. Strongly
+          recommended — the tree is large and an unscoped search is slow and
+          noisy.
+      ext:
+        type: string
+        required: false
+        max_length: 12
+        description: >-
+          File extension without the dot, e.g. `hs` for Haskell, `sql` for
+          migrations, `yaml` for config.
+      regex:
+        type: enum
+        required: false
+        values: ["true", "false"]
+        description: Treat the query as an extended regular expression.
+      limit:
+        type: int
+        required: false
+        default: 40
+        min: 1
+        max: 200
+        description: Maximum matching lines to return.
+    row_limit: 200
+    timeout_s: 30
+
+  - name: code_read
+    surface: code
+    kind: code
+    metric: read
+    description: >-
+      Read a file, or a window of it, with line numbers. Use after code_search
+      has given you a file and line: the match itself is rarely enough, and the
+      function around it is what actually explains the behaviour.
+
+      Returns a bounded window and says how many lines remain, so a large file
+      is read deliberately rather than dumped.
+    target: local
+    params:
+      file:
+        type: string
+        required: true
+        max_length: 300
+        description: >-
+          Path relative to the code root, INCLUDING the repository name, exactly
+          as code_search returned it.
+      start:
+        type: int
+        required: false
+        default: 1
+        min: 1
+        max: 100000
+        description: First line to show. Centre the window on the match.
+      lines:
+        type: int
+        required: false
+        default: 120
+        min: 10
+        max: 400
+        description: How many lines to return.
+    row_limit: 1
+    timeout_s: 20
+
+  - name: code_find
+    surface: code
+    kind: code
+    metric: find
+    description: >-
+      Find files whose NAME contains a fragment, e.g. `DriverInformation.hs` or
+      `Confirm.hs`. Use when you know roughly what a module is called but not
+      where it lives.
+
+      Matches the file name only, not the path, and is case-insensitive.
+    target: local
+    params:
+      name:
+        type: string
+        required: true
+        max_length: 120
+        description: Substring of the file name.
+      limit:
+        type: int
+        required: false
+        default: 40
+        min: 1
+        max: 200
+        description: Maximum paths to return.
+    row_limit: 200
+    timeout_s: 25
+
+  - name: code_repos
+    surface: code
+    kind: code
+    metric: repos
+    description: >-
+      Which repositories are available and at which commit. Check this when a
+      search returns nothing unexpectedly — the clone may still be syncing, or
+      the code you are looking for may live in a repository that is not here.
+
+      The commit matters: these are snapshots, so a very recent change may not
+      be present, and an answer drawn from source should say which commit it
+      was read at when precision matters.
+    target: local
+    params: {}
+    row_limit: 20
+    timeout_s: 10

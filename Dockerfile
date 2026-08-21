@@ -34,7 +34,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
-        ca-certificates curl gnupg unzip postgresql-client redis-tools sqlite3 tini; \
+        ca-certificates curl git gnupg unzip postgresql-client redis-tools sqlite3 tini; \
     arch="$(dpkg --print-architecture)"; \
     curl -fsSLo /usr/local/bin/kubectl \
         "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${arch}/kubectl"; \
@@ -118,5 +118,9 @@ ENTRYPOINT ["/usr/bin/tini", "--"]
 #
 # Files only on the volume are still left alone, so anything hand-placed there
 # survives.
+# Source clones are refreshed in the BACKGROUND. A first clone of a large
+# repository takes minutes, and the API must answer infrastructure questions
+# meanwhile — code functions report "not cloned yet" until the tree lands.
 CMD ["sh", "-c", "cp -r /app/runbooks-seed/. /data/runbooks/ 2>/dev/null; \
+     (sh /app/scripts/sync_code.sh 2>&1 | sed 's/^/[code] /' &) ; \
      exec uvicorn app.main:create_app --factory --host 0.0.0.0 --port 8000"]
