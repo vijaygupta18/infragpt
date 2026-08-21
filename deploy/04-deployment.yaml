@@ -1,0 +1,193 @@
+# infragpt API deployment.
+#
+# replicas: 1 and strategy: Recreate are BOTH required, and for the same reason:
+# the PVC is ReadWriteOnce and SQLite has one writer. RollingUpdate would try to
+# start a second pod holding the same volume before the first exits — on RWO the
+# new pod simply will not schedule, and the rollout hangs. Recreate stops the old
+# pod first, accepting a short outage instead of a stuck deploy.
+#
+# Do not raise replicas above 1 without first moving storage off SQLite/RWO.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: infragpt
+  namespace: apps
+  labels:
+    app.kubernetes.io/name: infragpt
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: infragpt
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: infragpt
+    spec:
+      serviceAccountName: infragpt
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001 # so the mounted PV is writable by the non-root user
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: api
+          # TODO: pin to a digest, not a tag. A mutable tag means the thing you
+          # reviewed and the thing that runs can differ.
+          image: <GCP_REGION>-docker.pkg.dev/<GCP_PROJECT>/infragpt/infragpt:0.1.41
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          env:
+            # --- cloud control-plane surfaces (public APIs, no VPC route) ----
+            # GCP token comes from Workload Identity; grant roles/monitoring.viewer
+            # + roles/alloydb.viewer ONLY.
+            #
+            # AWS uses OIDC FEDERATION, not stored keys. This pod runs in GKE, so
+            # IRSA never issues it credentials — but the exchange is the same:
+            # kubelet projects a token for the sts.amazonaws.com audience, and
+            # AssumeRoleWithWebIdentity trades it for short-lived credentials.
+            # The IAM role trusts this cluster's OIDC issuer AND this exact
+            # ServiceAccount, so the token is useless from anywhere else.
+            #
+            # All optional: the pod starts without them and the cloud surfaces
+            # report "credentials not set" rather than the deployment failing.
+            - name: AWS_ROLE_ARN
+              value: "arn:aws:iam::<AWS_ACCOUNT_ID>:role/infragpt-readonly"
+            - name: AWS_WEB_IDENTITY_TOKEN_FILE
+              value: "/var/run/secrets/aws/aws-token"
+            - name: GCP_PROJECT
+              value: "<GCP_PROJECT>"
+            - name: GCP_REGION
+              value: "<GCP_REGION>"
+            - name: AWS_REGION
+              value: "<AWS_REGION>"
+            - name: GCP_ACCESS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: infragpt-cloud
+                  key: gcp-access-token
+                  optional: true
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: infragpt-cloud
+                  key: aws-access-key-id
+                  optional: true
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: infragpt-cloud
+                  key: aws-secret-access-key
+                  optional: true
+            - name: INFRAGPT_DATA
+              value: /data
+            - name: INFRAGPT_REGISTRY
+              value: /app/registry
+            # KUBECONFIG is deliberately NOT set globally.
+            #
+            # Setting it makes kubectl use that file INSTEAD of in-cluster
+            # config. When the (optional) kubeconfig secret is absent the file
+            # does not exist, kubectl silently falls back to localhost:8080, and
+            # every GCP query fails with "connection refused" — which reads like
+            # a cluster problem rather than a configuration one.
+            #
+            # Unset, kubectl uses the pod's own ServiceAccount for GCP. The AWS
+            # path sets KUBECONFIG per-invocation instead (app/executors/k8s.py),
+            # so the two clouds cannot interfere with each other.
+
+            # --- named connections + endpoints -------------------------------
+            # Deliberately NOT in this file. Internal hostnames and cluster
+            # contexts are environment-specific, and this repository may become
+            # public — the application backend is open source. They live in a
+            # ConfigMap created at deploy time from the operator's own exports
+            # (see deploy/README.md), so the manifest stays environment-free.
+            #
+            # Writer endpoints are absent from that ConfigMap too. The way "no
+            # mutation path" stays true is that write targets are not reachable
+            # from this process at all.
+            - name: INFRAGPT_DAILY_TOKEN_BUDGET
+              value: "0" # 0 = unlimited; see app/limits/__init__.py
+          # Endpoints from a ConfigMap, credentials from a Secret. Both are
+          # created at deploy time rather than committed — see deploy/README.md.
+          # No GCP or AWS credential appears in either: those come from Workload
+          # Identity and IRSA at runtime, so no long-lived cloud key exists.
+          envFrom:
+            - configMapRef:
+                name: infragpt-endpoints
+            - secretRef:
+                name: infragpt
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: kubeconfig
+              mountPath: /kubeconfig
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+            # AWS identity, via OIDC federation rather than a stored key.
+            # kubelet issues and rotates this token; app/executors/awsapi.py
+            # exchanges it for short-lived AWS credentials with
+            # AssumeRoleWithWebIdentity. Nothing long-lived is stored anywhere.
+            - name: aws-token
+              mountPath: /var/run/secrets/aws
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+      volumes:
+        # Audience MUST be sts.amazonaws.com — it is what the IAM role's trust
+        # policy checks, alongside this ServiceAccount's name. A token minted
+        # for any other audience is refused by STS, which is what stops a token
+        # from being replayed against a different service.
+        - name: aws-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: aws-token
+                  audience: sts.amazonaws.com
+                  expirationSeconds: 3600
+        - name: data
+          persistentVolumeClaim:
+            claimName: infragpt-data
+        - name: kubeconfig
+          secret:
+            secretName: infragpt-kubeconfig
+            defaultMode: 0400
+            # Optional on purpose. This kubeconfig exists ONLY to reach the AWS
+            # cluster; GCP is reached in-cluster via the pod's own ServiceAccount
+            # with no kubeconfig at all. Without `optional` the pod refuses to
+            # start when it is absent, which would make the entire tool
+            # unavailable over a surface the team is migrating away from.
+            # Absent it, k8s:aws calls fail with a clear error and everything
+            # else works.
+            optional: true
+        - name: tmp
+          emptyDir: {} # readOnlyRootFilesystem still needs a writable /tmp

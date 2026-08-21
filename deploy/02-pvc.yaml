@@ -1,0 +1,28 @@
+# Persistent volume for the SQLite database, audit log, runbooks and backups.
+#
+# ReadWriteOnce, single replica — this is the storage decision from the plan and
+# it is an ACCEPTED RISK, not an oversight:
+#
+#   * No HA. The service is unavailable during a node drain or reschedule.
+#   * Data loss is bounded to 24h by the nightly backup CronJob.
+#   * The escape hatch, if RWO bites, is SQLite -> Postgres; the schema is
+#     deliberately portable (plain DDL, no ORM) to keep that move mechanical.
+#
+# What is NOT on this volume: the registry and the named connections. Those are
+# config in git, so losing this volume costs users, grants and history — never
+# capability.
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: infragpt-data
+  namespace: apps
+  labels:
+    app.kubernetes.io/name: infragpt
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+  # storageClassName: standard-rwo   # GKE default; uncomment to pin explicitly

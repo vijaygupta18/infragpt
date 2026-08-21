@@ -1,0 +1,126 @@
+# Cluster-wide READ on everything except Secrets.
+#
+# Replaces a narrow, hand-listed Role that kept running out of permissions
+# mid-question: a PodDisruptionBudget question failed with Forbidden, and so
+# would have HPAs, CRDs, Istio objects and anything else nobody thought to
+# enumerate in advance. An assistant meant to answer "anything about infra"
+# cannot be limited to the resources someone predicted would be asked about.
+#
+# HOW SECRETS ARE EXCLUDED. Kubernetes RBAC has no deny rule, so "everything
+# except X" has to be built structurally rather than declared:
+#
+#   * The core ("") group is ENUMERATED, and `secrets` is simply not in the
+#     list. It cannot be re-granted by a later wildcard, because...
+#   * ...every other group is wildcarded individually. A rule with
+#     `apiGroups: ["*"]` would match the core group too and hand back Secrets,
+#     which is exactly the mistake this layout exists to prevent.
+#
+# So adding a group here is safe, and adding `""` or `"*"` to the second rule
+# is not. If a new API group appears and something returns Forbidden, add the
+# group to the second rule — never widen the first.
+#
+# CONFIGMAPS ARE INCLUDED, which the previous Role deliberately avoided:
+# `list` returns whole objects including `data`, and ConfigMaps are a common
+# place for things that ought to be Secrets. That is a real exposure and it was
+# an explicit decision, not an oversight. The redactor still runs on all output,
+# and the audit log records every read.
+#
+# This is READ ONLY. Only get/list/watch appear, so nothing here can create,
+# update, patch, delete, or evict. That is the property to preserve in review:
+# a verb added to these rules is a far bigger change than a resource added.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: infragpt-read-all
+  labels:
+    app.kubernetes.io/name: infragpt
+rules:
+  # Core group, enumerated. `secrets` is absent and must stay absent.
+  - apiGroups: [""]
+    resources:
+      - bindings
+      - componentstatuses
+      - configmaps
+      - endpoints
+      - events
+      - limitranges
+      - namespaces
+      - nodes
+      - persistentvolumeclaims
+      - persistentvolumes
+      - pods
+      - pods/log
+      - pods/status
+      - podtemplates
+      - replicationcontrollers
+      - resourcequotas
+      - serviceaccounts
+      - services
+    verbs: ["get", "list", "watch"]
+
+  # Everything else. Listed group by group ON PURPOSE — a "*" here would match
+  # the core group and undo the exclusion above.
+  - apiGroups:
+      - acme.cert-manager.io
+      - admissionregistration.k8s.io
+      - apiextensions.k8s.io
+      - apiregistration.k8s.io
+      - apps
+      - authentication.k8s.io
+      - authorization.k8s.io
+      - auto.gke.io
+      - autoscaling
+      - autoscaling.x-k8s.io
+      - batch
+      - cert-manager.io
+      - certificates.k8s.io
+      - cilium.io
+      - cloud.google.com
+      - coordination.k8s.io
+      - core.strimzi.io
+      - datalayer.gke.io
+      - discovery.k8s.io
+      - elbv2.k8s.aws
+      - events.k8s.io
+      - extensions.istio.io
+      - flowcontrol.apiserver.k8s.io
+      - hub.gke.io
+      - internal.autoscaling.gke.io
+      - kafka.strimzi.io
+      - metrics.k8s.io
+      - monitoring.coreos.com
+      - monitoring.googleapis.com
+      - networking.gke.io
+      - networking.istio.io
+      - networking.k8s.io
+      - node.gke.io
+      - node.k8s.io
+      - nodemanagement.gke.io
+      - operator.victoriametrics.com
+      - policy
+      - rbac.authorization.k8s.io
+      - resource.k8s.io
+      - scheduling.k8s.io
+      - security.istio.io
+      - snapshot.storage.k8s.io
+      - storage.k8s.io
+      - telemetry.istio.io
+      - external-secrets.io
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: infragpt-read-all
+  labels:
+    app.kubernetes.io/name: infragpt
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: infragpt-read-all
+subjects:
+  - kind: ServiceAccount
+    name: infragpt
+    namespace: apps

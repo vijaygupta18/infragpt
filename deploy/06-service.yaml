@@ -1,0 +1,27 @@
+# ClusterIP Service.
+#
+# ClusterIP, NOT LoadBalancer or NodePort. Pomerium fronts this service and is
+# where authentication happens; exposing the pod directly would let anything that
+# can reach the cluster network bypass SSO entirely.
+#
+# Note that the API verifies the Pomerium JWT signature server-side against
+# Pomerium's JWKS rather than trusting the header — so a direct connection is not
+# actually an auth bypass. Both controls exist because either one alone is a
+# single point of failure for the whole access model.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: infragpt
+  namespace: apps
+  labels:
+    app.kubernetes.io/name: infragpt
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: infragpt
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
