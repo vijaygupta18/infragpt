@@ -105,7 +105,7 @@ BUSINESS_ROWS_REFUSED = [
     "SELECT * FROM public.person",
     "SELECT * FROM pg_class JOIN ride ON true",
     "WITH x AS (SELECT id FROM driver_information) SELECT * FROM x",
-    "SELECT * FROM atlas_app.booking",
+    "SELECT * FROM public.booking",
 ]
 
 

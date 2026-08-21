@@ -1,4 +1,4 @@
-"""Juspay Grid gateway client.
+"""LLM gateway client — OpenAI-compatible chat completions.
 
 Two calls per question, deliberately separated:
 

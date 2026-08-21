@@ -36,8 +36,8 @@ entries:
         required: true
         values: [driver_noncrit, driver_ro, rider_ro]
         description: >-
-          Which database. driver_ro = driver_db_v1 (BPP / driver
-          side), rider_ro = atlas_app_v1 (BAP / rider side).
+          Which database: driver_ro is the driver side, rider_ro is
+          the rider side. Both are read replicas.
     sql: |
       SELECT c.table_schema,
              c.column_name,
