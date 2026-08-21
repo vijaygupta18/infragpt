@@ -34,6 +34,7 @@ from app.limits.deps import check_token_budget, enforce_question_rate, record_qu
 from app.registry.loader import get_registry, resolve_target, unavailable_surfaces
 from app.registry.schema import Surface
 from app.runbooks import get_runbooks
+from app.runs import Run, get_run_registry
 from app.storage import Storage, get_storage
 
 router = APIRouter(tags=["ask"])
@@ -588,40 +589,100 @@ async def ask_stream(
     storage: Annotated[Storage, Depends(get_storage)],
     _rate: Annotated[Principal, Depends(enforce_question_rate)] = None,  # noqa: RUF013
 ) -> StreamingResponse:
-    """Same work as /ask, with progress events as server-sent events.
+    """Start a question and stream it. The work outlives this connection.
 
-    Waiting 40 seconds at a spinner that says nothing is the difference between
-    a tool that feels stuck and one that feels like it is working. These events
-    are the same facts the evidence spine shows afterwards — which function,
-    which cloud, did it succeed — just reported as they happen.
+    The run is created first and the connection merely attaches to it, so
+    closing the tab, reloading, or losing the network stops the STREAM and not
+    the WORK. Previously the task was cancelled in a `finally` when the
+    generator closed, which meant a reload threw away a minute of gathering and
+    left nothing to come back to.
+
+    The first event carries the run id, so a client that reloads can reattach.
     """
-    queue: asyncio.Queue[str | None] = asyncio.Queue()
+    registry = get_run_registry()
+    run = registry.create(principal.email, body.question.strip())
 
     async def emit(kind: str, payload: dict[str, Any]) -> None:
-        await queue.put(json.dumps({"type": kind, **payload}))
+        run.publish(kind, payload)
 
-    async def run() -> None:
+    async def work() -> None:
         try:
             result = await _answer(body, principal, storage, emit=emit)
-            await queue.put(json.dumps({"type": "answer", **result.model_dump()}))
+            run.conversation_id = result.conversation_id
+            run.publish("answer", result.model_dump())
+            run.finish("done")
+        except asyncio.CancelledError:
+            # Stopping is a decision, and `stop` has already recorded it.
+            raise
         except HTTPException as exc:
-            await queue.put(json.dumps({"type": "error", "detail": str(exc.detail)}))
+            run.publish("error", {"detail": str(exc.detail)})
+            run.finish("error")
         except Exception as exc:  # noqa: BLE001 - surfaced, never swallowed
-            await queue.put(json.dumps({"type": "error", "detail": f"{type(exc).__name__}: {exc}"}))
-        finally:
-            await queue.put(None)
+            run.publish("error", {"detail": f"{type(exc).__name__}: {exc}"})
+            run.finish("error")
+
+    run.task = asyncio.create_task(work())
+    run.publish("run", {"run_id": run.id})
+    return _attach(run, from_index=0)
+
+
+@router.get("/ask/runs/{run_id}/stream")
+async def ask_reattach(
+    run_id: str,
+    principal: Annotated[Principal, Depends(current_user)],
+    after: int = 0,
+) -> StreamingResponse:
+    """Reattach to a run already in progress, replaying what was missed."""
+    run = get_run_registry().get(run_id, principal.email)
+    if run is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "no such run")
+    return _attach(run, from_index=after)
+
+
+@router.post("/ask/runs/{run_id}/stop")
+async def ask_stop(
+    run_id: str,
+    principal: Annotated[Principal, Depends(current_user)],
+) -> dict[str, Any]:
+    """Stop a run the caller started.
+
+    Separate from detaching on purpose: leaving the page must not cancel work,
+    so cancelling has to be something a person asks for.
+    """
+    registry = get_run_registry()
+    run = registry.get(run_id, principal.email)
+    if run is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "no such run")
+    if run.live:
+        registry.stop(run)
+    return {"run_id": run.id, "status": run.status}
+
+
+@router.get("/ask/runs")
+async def ask_runs(
+    principal: Annotated[Principal, Depends(current_user)],
+) -> list[dict[str, Any]]:
+    """Runs of the caller's that are still going — what to reattach to."""
+    return [
+        {
+            "run_id": r.id,
+            "question": r.question,
+            "events": len(r.events) + r.dropped,
+            "conversation_id": r.conversation_id,
+        }
+        for r in get_run_registry().active_for(principal.email)
+    ]
+
+
+def _attach(run: Run, from_index: int) -> StreamingResponse:
+    """Stream one run's events. Detaching never touches the run."""
 
     async def events() -> AsyncIterator[str]:
-        task = asyncio.create_task(run())
-        try:
-            while True:
-                item = await queue.get()
-                if item is None:
-                    break
-                yield f"data: {item}\n\n"
-        finally:
-            if not task.done():
-                task.cancel()
+        # The id goes first on every attach, including reattaches, so the client
+        # never has to remember which run it is watching.
+        yield f'data: {json.dumps({"type": "run", "run_id": run.id})}\n\n'
+        async for item in run.subscribe(from_index):
+            yield f"data: {item}\n\n"
 
     return StreamingResponse(
         events(),

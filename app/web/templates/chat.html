@@ -214,6 +214,17 @@ details.spine:not([open]) > .spine-head { margin-bottom: 0; }
 .step .what { color: var(--ink-2); }
 .step .detail { color: var(--muted); word-break: break-all; }
 .activity .elapsed { font-family: var(--mono); color: var(--muted); }
+.activity .stopbtn {
+  margin-left: .6rem; padding: .1rem .5rem; font-size: .72rem;
+  border: 1px solid var(--line); border-radius: var(--r-control);
+  background: var(--card); color: var(--ink-2); cursor: pointer;
+}
+.activity .stopbtn:hover:not(:disabled) { color: var(--fail); border-color: var(--fail); }
+.activity .stopbtn:disabled { opacity: .55; cursor: default; }
+.resumed {
+  font-size: .8rem; color: var(--muted); margin: .2rem 0 .5rem;
+  padding-left: .6rem; border-left: 2px solid var(--gcp);
+}
 
 /* While streaming, the text is plain and gets a soft caret so it reads as
    still-arriving rather than finished-and-badly-formatted. */
@@ -628,7 +639,15 @@ details.spine:not([open]) > .spine-head { margin-bottom: 0; }
     var pulse = el('span', 'pulse');
     var label = el('span', null, 'Working');
     var elapsed = el('span', 'elapsed', '0s');
+    /* Stop is available for as long as the run is. It is a button rather than
+       a link inside the summary so clicking it never toggles the disclosure
+       underneath — stopping by accident while trying to expand would be a
+       genuinely annoying way to lose a minute of work. */
+    var stopBtn = el('button', 'stopbtn', 'Stop');
+    stopBtn.type = 'button';
+    stopBtn.hidden = true;
     sum.appendChild(pulse); sum.appendChild(label); sum.appendChild(elapsed);
+    sum.appendChild(stopBtn);
     box.appendChild(sum);
     var steps = el('div', 'steps');
     box.appendChild(steps);
@@ -665,6 +684,17 @@ details.spine:not([open]) > .spine-head { margin-bottom: 0; }
 
     return {
       node: box,
+
+      onStop: function (fn) {
+        stopBtn.hidden = false;
+        stopBtn.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          stopBtn.disabled = true;
+          stopBtn.textContent = 'Stopping…';
+          fn();
+        });
+      },
 
       /* A plain stage line (selecting / synthesizing). */
       step: function (what, detail, state) {
@@ -742,28 +772,45 @@ details.spine:not([open]) > .spine-head { margin-bottom: 0; }
       finish: function (text) {
         clearInterval(ticker);
         pulse.remove();
+        stopBtn.remove();
         label.textContent = text;
         box.open = false;   /* collapse once the answer is there */
       }
     };
   }
 
-  form.addEventListener('submit', function (e) {
-    e.preventDefault();
-    var question = input.value.trim();
-    if (!question) { return; }
-    input.value = '';
-    autogrow();
-    send.disabled = true;
-    if (empty) { empty.remove(); empty = null; }
+  function clearRun() {
+    try { localStorage.removeItem('infragpt.run'); } catch (e) { /* private mode */ }
+  }
 
-    var turn = el('div', 'turn');
-    turn.appendChild(el('div', 'question', question));
-    var activity = makeActivity();
-    turn.appendChild(activity.node);
-    transcript.appendChild(turn);
-    turn.scrollIntoView({ block: 'end' });
+  /* Consume an SSE body, feeding each event to `handle`. Shared by a fresh
+     question and by reattaching, so a resumed run renders through exactly the
+     same code as a live one — two renderers would drift, and the resumed path
+     is where a difference would be least likely to be noticed. */
+  function pumpEvents(resp, handle) {
+    var reader = resp.body.getReader();
+    var decoder = new TextDecoder();
+    var buf = '';
+    return (function pump() {
+      return reader.read().then(function (res) {
+        if (res.done) { return; }
+        buf += decoder.decode(res.value, { stream: true });
+        var parts = buf.split('\n\n');
+        buf = parts.pop();
+        parts.forEach(function (chunk) {
+          var line = chunk.split('\n').find(function (l) { return l.indexOf('data:') === 0; });
+          if (!line) { return; }
+          try { handle(JSON.parse(line.slice(5).trim())); } catch (e) { /* partial */ }
+        });
+        return pump();
+      });
+    })();
+  }
 
+  /* One handler, used by a fresh question and by rejoining a run already in
+     progress. Two renderers would drift, and the rejoined path is exactly
+     where a difference would be least likely to be noticed. */
+  function makeHandler(turn, activity, question) {
     var STAGE_TEXT = {
       selecting: 'Choosing functions',
       running: 'Running',
@@ -774,9 +821,25 @@ details.spine:not([open]) > .spine-head { margin-bottom: 0; }
     var roundNo = 0;
     var streamEl = null;
     var streamText = '';
+    var runId = null;
+    var evIndex = 0;
 
     function handle(ev) {
-      if (ev.type === 'stage') {
+      evIndex++;
+      if (ev.type === 'run') {
+        /* Remember the run so a reload can reattach to work already going. */
+        runId = ev.run_id;
+        try { localStorage.setItem('infragpt.run', JSON.stringify(
+          { id: runId, question: question, at: Date.now() })); } catch (e) { /* private mode */ }
+        activity.onStop(function () {
+          fetch('/ask/runs/' + encodeURIComponent(runId) + '/stop', { method: 'POST' });
+        });
+      } else if (ev.type === 'stopped') {
+        activity.finish('stopped');
+        turn.appendChild(el('div', 'answer muted', 'Stopped. Nothing was changed — every function is read-only.'));
+        clearRun();
+        send.disabled = false;
+      } else if (ev.type === 'stage') {
         if (openStage) { openStage.classList.add('done'); openStage.firstChild.textContent = '\u2713'; }
         /* The 'running' stage used to list the call names, which then appeared
            again as a row each. Duplicated text reads as duplicated work. The
@@ -815,7 +878,7 @@ details.spine:not([open]) > .spine-head { margin-bottom: 0; }
         if (streamEl) { streamEl.remove(); streamEl = null; }
       } else if (ev.type === 'answer') {
         if (openStage) { openStage.classList.add('done'); openStage.firstChild.textContent = '\u2713'; }
-        activity.finish(callCount + (callCount === 1 ? ' call' : ' calls'));
+        clearRun(); activity.finish(callCount + (callCount === 1 ? ' call' : ' calls'));
         if (ev.conversation_id && !conversationId) {
           conversationId = ev.conversation_id;
           window.history.replaceState({}, '', '/c/' + conversationId);
@@ -842,10 +905,31 @@ details.spine:not([open]) > .spine-head { margin-bottom: 0; }
         tools.appendChild(copyButton(function () { return ev.answer; }));
         turn.appendChild(tools);
       } else if (ev.type === 'error') {
-        activity.finish('failed');
+        clearRun(); activity.finish('failed');
         turn.appendChild(el('div', 'answer err', ev.detail));
       }
     }
+    return handle;
+  }
+
+  form.addEventListener('submit', function (e) {
+    e.preventDefault();
+    var question = input.value.trim();
+    if (!question) { return; }
+    input.value = '';
+    autogrow();
+    send.disabled = true;
+    if (empty) { empty.remove(); empty = null; }
+
+    var turn = el('div', 'turn');
+    turn.appendChild(el('div', 'question', question));
+    var activity = makeActivity();
+    turn.appendChild(activity.node);
+    transcript.appendChild(turn);
+    turn.scrollIntoView({ block: 'end' });
+
+    var handle = makeHandler(turn, activity, question);
+
 
     fetch('/ask/stream', {
       method: 'POST',
@@ -857,31 +941,63 @@ details.spine:not([open]) > .spine-head { margin-bottom: 0; }
           handle({ type: 'error', detail: (b && b.detail) || ('HTTP ' + r.status) });
         });
       }
-      var reader = r.body.getReader();
-      var decoder = new TextDecoder();
-      var buf = '';
-      return (function pump() {
-        return reader.read().then(function (res) {
-          if (res.done) { return; }
-          buf += decoder.decode(res.value, { stream: true });
-          var parts = buf.split('\n\n');
-          buf = parts.pop();
-          parts.forEach(function (chunk) {
-            var line = chunk.replace(/^data: /, '').trim();
-            if (!line) { return; }
-            try { handle(JSON.parse(line)); } catch (err) { /* partial frame */ }
-          });
-          return pump();
-        });
-      })();
+      return pumpEvents(r, handle);
     }).catch(function (err) {
-      handle({ type: 'error', detail: 'Request failed: ' + err });
+      /* A dropped connection is NOT a dead question any more. The run keeps
+         going server-side, so say so and offer to rejoin rather than
+         reporting a failure that did not happen. */
+      if (runId) {
+        handle({ type: 'error',
+                 detail: 'Lost the connection. The question is still running — reload to rejoin it.' });
+      } else {
+        handle({ type: 'error', detail: 'Request failed: ' + err });
+      }
     }).then(function () {
       send.disabled = false;
       input.focus();
       window.scrollTo({ top: document.body.scrollHeight });
     });
   });
+
+  /* ---- resume a run in progress ------------------------------------------
+     Asks the SERVER what is still running rather than trusting localStorage:
+     the stored id may be stale, from another device, or for a run that has
+     already finished. The server is the only thing that knows, and a wrong
+     "still working" spinner is worse than no resume at all. */
+  (function resumeRuns() {
+    fetch('/ask/runs')
+      .then(function (r) { return r.ok ? r.json() : []; })
+      .then(function (runs) {
+        if (!runs.length) { clearRun(); return; }
+        var info = runs[0];
+
+        var turn = el('div', 'turn');
+        turn.appendChild(el('div', 'question', info.question));
+        var activity = makeActivity();
+        turn.appendChild(activity.node);
+        transcript.appendChild(turn);
+        if (empty) { empty.remove(); empty = null; }
+
+        var note = el('div', 'resumed', 'Rejoined a question that was still running.');
+        turn.insertBefore(note, activity.node);
+
+        var handle = makeHandler(turn, activity, info.question);
+        send.disabled = true;
+        /* after=0 replays the whole run, so the rejoined page shows what it
+           would have shown had the tab never closed. */
+        fetch('/ask/runs/' + encodeURIComponent(info.run_id) + '/stream?after=0')
+          .then(function (r) {
+            if (!r.ok || !r.body) { throw new Error('could not rejoin'); }
+            return pumpEvents(r, handle);
+          })
+          .catch(function () {
+            activity.finish('lost');
+            note.textContent = 'That question could not be rejoined.';
+          })
+          .then(function () { send.disabled = false; });
+      })
+      .catch(function () { /* resume is a convenience, never an error */ });
+  })();
 
   /* ---- keyboard ---------------------------------------------------------- */
 
