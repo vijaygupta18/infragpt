@@ -435,7 +435,7 @@ async def test_dispatch_always_redacts_success_output(registry: Registry) -> Non
     assert "9876543210" not in str(result.rows)
     assert "ABCDE1234F" not in str(result.rows)
     assert "ravi@example.com" not in result.text
-    assert "example.in" in result.text  # domain kept, local part hashed
+    assert "example.com" in result.text  # domain kept, local part hashed
 
 
 @pytest.mark.asyncio
