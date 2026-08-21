@@ -1,0 +1,110 @@
+# Metrics METADATA — what the store actually contains.
+#
+# These replaced entries that pointed at `mcp-victoriametrics` and
+# `mcp-grafana`. Both were verified dead on 2026-08-19: they speak the legacy
+# SSE transport, so every call 404'd. The same data is one GET away on the
+# metrics connection already used for every PromQL query, so these read it
+# directly — fewer moving parts, and one fewer service to be down mid-incident.
+#
+# WHY THIS MATTERS MORE THAN IT LOOKS: every metric name in this registry is a
+# potential silent false negative. A name that does not exist returns an empty
+# series, an empty series renders as zero, and zero reads as health. These are
+# how the model checks what is really there instead of trusting a name.
+
+entries:
+  - name: metric_names
+    surface: metrics
+    kind: vmmeta
+    metric: metric_names
+    description: >-
+      List metric names present in the store, optionally filtered by a series
+      selector. USE THIS WHENEVER A METRIC QUERY RETURNS NOTHING — an empty
+      result means either "no data" or "this name does not exist here", and only
+      this call tells them apart. Reporting a healthy system off a misspelled
+      metric is the most damaging mistake available on this surface.
+    target: metrics
+    params:
+      match:
+        type: string
+        required: false
+        max_length: 200
+        description: >-
+          Series selector, e.g. `{__name__=~"istio.*"}` or
+          `{__name__=~".*drainer.*"}`. Strongly recommended — unfiltered, this
+          returns thousands of names and is useless during an incident.
+    row_limit: 200
+    timeout_s: 25
+
+  - name: metric_labels
+    surface: metrics
+    kind: vmmeta
+    metric: label_names
+    description: >-
+      List the label names the store knows about. Use when a query returns
+      nothing and you suspect the LABEL is wrong rather than the metric — the
+      known trap here is `destination_workload` (correct) versus
+      `destination_service_name` (what a generic Istio guide says, and which
+      matches nothing).
+    target: metrics
+    params:
+      match:
+        type: string
+        required: false
+        max_length: 200
+        description: Optional series selector to scope the labels to one metric.
+    row_limit: 200
+    timeout_s: 25
+
+  - name: metric_label_values
+    surface: metrics
+    kind: vmmeta
+    metric: label_values
+    description: >-
+      The values a given label actually takes. The direct answer to "what are
+      the real service names?" — use it to get an exact `destination_workload`
+      before querying per-service error rates, instead of guessing at a name and
+      reading the empty result as healthy.
+    target: metrics
+    params:
+      label:
+        type: identifier
+        required: true
+        description: Label name, e.g. `destination_workload` or `response_code`.
+      match:
+        type: string
+        required: false
+        max_length: 200
+        description: >-
+          Optional selector to scope it, e.g. `{__name__="istio_requests_total"}`.
+    row_limit: 200
+    timeout_s: 25
+
+  - name: active_alerts
+    surface: metrics
+    kind: vmmeta
+    metric: active_alerts
+    description: >-
+      Alerts currently FIRING. Worth checking early on any "is something wrong"
+      question: an alert already firing usually names the problem faster than
+      deriving it from raw metrics.
+
+      An empty result means nothing is firing in THIS store. It does not mean
+      the platform is healthy — alerting coverage is not complete, and a
+      component with no alert rule cannot fire one.
+    target: metrics
+    params: {}
+    row_limit: 100
+    timeout_s: 25
+
+  - name: alert_rules
+    surface: metrics
+    kind: vmmeta
+    metric: alert_rules
+    description: >-
+      The alert rules that EXIST, firing or not. Use to answer "do we even alert
+      on this?" — which is the right follow-up when something broke and nobody
+      was paged.
+    target: metrics
+    params: {}
+    row_limit: 100
+    timeout_s: 25

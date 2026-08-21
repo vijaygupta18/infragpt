@@ -1,0 +1,724 @@
+# infragpt registry — DB surface (READ-ONLY, SCHEMA + PERFORMANCE METADATA ONLY)
+#
+# HARD RULE: no business rows, no PII columns, no SELECT against an application
+# table. Everything here reads pg_catalog / information_schema / pg_stat_*.
+# Adding an entry that selects application data is a reviewed, deliberate
+# decision behind a `pii` tag — not something to slip in here.
+#
+# Parameters are named bind params (:name) and are bound by the driver. There is
+# no string interpolation anywhere in this file. Identifier params (`table`) are
+# additionally verified to exist in pg_catalog before the query runs.
+#
+# `target: $db` resolves the named connection from the validated `db` param,
+# whose enum members are exactly the reader connections declared in app.config.
+
+# CONNECTION CHOICE: driver_noncrit is the non-critical driver read pool and
+# should be the default for driver-side questions. The critical reader
+# (driver_ro) sits in the path of drivers going online, so anything scan-heavy
+# belongs on the non-critical pool — use driver_ro only when the question is
+# about that reader's own state (its connections, its lag, its cache hits).
+
+entries:
+  - name: table_info
+    surface: db:read
+    kind: sql
+    description: >-
+      Column definitions for a table: name, data type, nullability and default.
+      Schema metadata only — returns no row data.
+    target: $db
+    params:
+      table:
+        type: identifier
+        required: true
+        description: Unqualified table name, e.g. person or booking.
+      db:
+        type: enum
+        required: true
+        values: [driver_noncrit, driver_ro, rider_ro]
+        description: >-
+          Which database. driver_ro = driver_db_v1 (BPP / driver
+          side), rider_ro = atlas_app_v1 (BAP / rider side).
+    sql: |
+      SELECT c.table_schema,
+             c.column_name,
+             c.data_type,
+             c.is_nullable,
+             c.column_default,
+             c.character_maximum_length
+      FROM information_schema.columns c
+      WHERE c.table_name = :table
+        AND c.table_schema NOT IN ('pg_catalog', 'information_schema')
+      ORDER BY c.table_schema, c.ordinal_position
+    row_limit: 500
+    timeout_s: 10
+
+  - name: table_indexes
+    surface: db:read
+    kind: sql
+    description: >-
+      Indexes on a table with their definition, size and scan counts. Use to
+      answer "is there an index on X" and "which index is actually used".
+    target: $db
+    params:
+      table:
+        type: identifier
+        required: true
+        description: Unqualified table name.
+      db:
+        type: enum
+        required: true
+        values: [driver_noncrit, driver_ro, rider_ro]
+        description: Which reader database to query.
+    sql: |
+      SELECT s.schemaname,
+             s.indexrelname AS index_name,
+             i.indexdef,
+             s.idx_scan,
+             s.idx_tup_read,
+             s.idx_tup_fetch,
+             pg_size_pretty(pg_relation_size(s.indexrelid)) AS index_size
+      FROM pg_stat_user_indexes s
+      JOIN pg_indexes i
+        ON i.schemaname = s.schemaname
+       AND i.tablename  = s.relname
+       AND i.indexname  = s.indexrelname
+      WHERE s.relname = :table
+      ORDER BY pg_relation_size(s.indexrelid) DESC
+    row_limit: 200
+    timeout_s: 15
+
+  - name: index_usage
+    surface: db:read
+    kind: sql
+    description: >-
+      Most-used indexes across the database ranked by scan count, with size.
+      Use for a broad picture of index effectiveness.
+    target: $db
+    params:
+      db:
+        type: enum
+        required: true
+        values: [driver_noncrit, driver_ro, rider_ro]
+        description: Which reader database to query.
+    sql: |
+      SELECT schemaname,
+             relname AS table_name,
+             indexrelname AS index_name,
+             idx_scan,
+             idx_tup_read,
+             pg_size_pretty(pg_relation_size(indexrelid)) AS index_size
+      FROM pg_stat_user_indexes
+      ORDER BY idx_scan DESC
+    row_limit: 100
+    timeout_s: 20
+
+  - name: unused_indexes
+    surface: db:read
+    kind: sql
+    description: >-
+      Indexes that have never been scanned since the last stats reset, largest
+      first. CRITICAL CAVEAT you must state in any answer using this: these stats
+      are PER NODE, and this queries a read replica. An index unused here may be
+      heavily used on the writer or on another replica. Zero scans is therefore
+      NOT evidence an index can be dropped. Report these strictly as "unused on
+      this replica", never as removal candidates.
+    target: $db
+    params:
+      db:
+        type: enum
+        required: true
+        values: [driver_noncrit, driver_ro, rider_ro]
+        description: Which reader database to query.
+      min_size_mb:
+        type: int
+        required: false
+        default: 1
+        min: 0
+        max: 100000
+        description: Only report indexes at least this many MB. Defaults to 1.
+    sql: |
+      SELECT s.schemaname,
+             s.relname AS table_name,
+             s.indexrelname AS index_name,
+             s.idx_scan,
+             pg_size_pretty(pg_relation_size(s.indexrelid)) AS index_size
+      FROM pg_stat_user_indexes s
+      JOIN pg_index i ON i.indexrelid = s.indexrelid
+      WHERE s.idx_scan = 0
+        AND NOT i.indisunique
+        AND NOT i.indisprimary
+        AND pg_relation_size(s.indexrelid) >= (:min_size_mb * 1024 * 1024)
+      ORDER BY pg_relation_size(s.indexrelid) DESC
+    row_limit: 100
+    timeout_s: 20
+
+  - name: table_size
+    surface: db:read
+    kind: sql
+    description: >-
+      Total, heap, index and TOAST size for a single table.
+    target: $db
+    params:
+      table:
+        type: identifier
+        required: true
+        description: Unqualified table name.
+      db:
+        type: enum
+        required: true
+        values: [driver_noncrit, driver_ro, rider_ro]
+        description: Which reader database to query.
+    sql: |
+      SELECT n.nspname AS schema_name,
+             c.relname AS table_name,
+             pg_size_pretty(pg_total_relation_size(c.oid))                       AS total_size,
+             pg_size_pretty(pg_table_size(c.oid))                                AS table_size,
+             pg_size_pretty(pg_indexes_size(c.oid))                              AS indexes_size,
+             pg_total_relation_size(c.oid)                                       AS total_bytes
+      FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE c.relname = :table
+        AND c.relkind IN ('r', 'p', 'm')
+      ORDER BY pg_total_relation_size(c.oid) DESC
+    row_limit: 20
+    timeout_s: 15
+
+  - name: row_estimate
+    surface: db:read
+    kind: sql
+    description: >-
+      Planner row estimate (reltuples) and dead-tuple count for a table, plus
+      last vacuum/analyze times. Cheap — does not count rows.
+    target: $db
+    params:
+      table:
+        type: identifier
+        required: true
+        description: Unqualified table name.
+      db:
+        type: enum
+        required: true
+        values: [driver_noncrit, driver_ro, rider_ro]
+        description: Which reader database to query.
+    sql: |
+      SELECT s.schemaname,
+             s.relname AS table_name,
+             c.reltuples::bigint AS estimated_rows,
+             s.n_live_tup,
+             s.n_dead_tup,
+             s.last_vacuum,
+             s.last_autovacuum,
+             s.last_analyze,
+             s.last_autoanalyze
+      FROM pg_stat_user_tables s
+      JOIN pg_class c ON c.oid = s.relid
+      WHERE s.relname = :table
+    row_limit: 20
+    timeout_s: 10
+
+  # REMOVED 2026-08-17: `top_queries`, which read pg_stat_statements.
+  #
+  # Verified against prod: pg_stat_statements is not installed on the readers OR
+  # the writer, and AlloyDB's own equivalent (g_agg_stat_statements) errors out
+  # because google_columnar_engine is not loaded. There is therefore NO historical
+  # query-statistics source available to this tool.
+  #
+  # Shipping the entry anyway would be worse than not having it: the reader-latency
+  # runbook leads with it, so the assistant would confidently open its most
+  # important investigation and hit `relation "pg_stat_statements" does not exist`.
+  #
+  # For live (not historical) query diagnosis, use `long_running_queries`, which
+  # reads pg_stat_activity and does work. To restore historical stats, someone must
+  # add pg_stat_statements to shared_preload_libraries — a production change
+  # requiring approval and a restart. Re-add this entry if that happens.
+
+  - name: active_connections
+    surface: db:read
+    kind: sql
+    description: >-
+      Connection counts grouped by database, user, application and state. Use
+      to check whether a reader is near its connection limit.
+    target: $db
+    params:
+      db:
+        type: enum
+        required: true
+        values: [driver_noncrit, driver_ro, rider_ro]
+        description: Which reader database to query.
+    sql: |
+      SELECT datname,
+             usename,
+             application_name,
+             state,
+             count(*) AS connections
+      FROM pg_stat_activity
+      GROUP BY datname, usename, application_name, state
+      ORDER BY connections DESC
+    row_limit: 100
+    timeout_s: 10
+
+  - name: long_running_queries
+    surface: db:read
+    kind: sql
+    description: >-
+      Queries currently running for longer than a threshold, with wait event
+      and backend age. The first thing to check when a reader is slow.
+    target: $db
+    params:
+      db:
+        type: enum
+        required: true
+        values: [driver_noncrit, driver_ro, rider_ro]
+        description: Which reader database to query.
+      min_seconds:
+        type: int
+        required: false
+        default: 30
+        min: 1
+        max: 86400
+        description: Minimum running duration in seconds. Defaults to 30.
+    sql: |
+      SELECT pid,
+             usename,
+             application_name,
+             state,
+             wait_event_type,
+             wait_event,
+             extract(epoch FROM (now() - query_start))::int AS running_seconds,
+             query
+      FROM pg_stat_activity
+      WHERE state <> 'idle'
+        AND query_start IS NOT NULL
+        AND now() - query_start > (:min_seconds * interval '1 second')
+      ORDER BY query_start ASC
+    row_limit: 50
+    timeout_s: 15
+
+  - name: locks
+    surface: db:read
+    kind: sql
+    description: >-
+      Blocked backends and the backends blocking them. Use when writes or reads
+      appear stuck rather than merely slow.
+    target: $db
+    params:
+      db:
+        type: enum
+        required: true
+        values: [driver_noncrit, driver_ro, rider_ro]
+        description: Which reader database to query.
+    sql: |
+      SELECT blocked.pid            AS blocked_pid,
+             blocked.usename        AS blocked_user,
+             blocked.wait_event_type,
+             blocked.wait_event,
+             blocking.pid           AS blocking_pid,
+             blocking.usename       AS blocking_user,
+             blocked.query          AS blocked_query,
+             blocking.query         AS blocking_query
+      FROM pg_stat_activity blocked
+      JOIN LATERAL unnest(pg_blocking_pids(blocked.pid)) AS bpid ON true
+      JOIN pg_stat_activity blocking ON blocking.pid = bpid
+      WHERE cardinality(pg_blocking_pids(blocked.pid)) > 0
+      ORDER BY blocked.query_start ASC
+    row_limit: 50
+    timeout_s: 15
+
+  - name: replication_lag
+    surface: db:read
+    kind: sql
+    description: >-
+      Replication state and lag per connected standby / read replica, in bytes
+      and seconds. Run against a primary-attached reader to see replica lag.
+    target: $db
+    params:
+      db:
+        type: enum
+        required: true
+        values: [driver_noncrit, driver_ro, rider_ro]
+        description: Which reader database to query.
+    sql: |
+      SELECT client_addr,
+             application_name,
+             state,
+             sync_state,
+             pg_wal_lsn_diff(sent_lsn, replay_lsn) AS replay_lag_bytes,
+             extract(epoch FROM write_lag)::numeric  AS write_lag_seconds,
+             extract(epoch FROM flush_lag)::numeric  AS flush_lag_seconds,
+             extract(epoch FROM replay_lag)::numeric AS replay_lag_seconds
+      FROM pg_stat_replication
+      ORDER BY replay_lag_seconds DESC NULLS LAST
+    row_limit: 50
+    timeout_s: 10
+
+  - name: cache_hit_ratio
+    surface: db:read
+    kind: sql
+    description: >-
+      Shared-buffer cache hit ratio per database, with block read/hit counts. A
+      ratio well below ~0.99 on a hot database points at memory pressure.
+    target: $db
+    params:
+      db:
+        type: enum
+        required: true
+        values: [driver_noncrit, driver_ro, rider_ro]
+        description: Which reader database to query.
+    sql: |
+      SELECT datname,
+             blks_hit,
+             blks_read,
+             round(blks_hit::numeric / NULLIF(blks_hit + blks_read, 0), 4) AS cache_hit_ratio,
+             xact_commit,
+             xact_rollback,
+             stats_reset
+      FROM pg_stat_database
+      WHERE datname IS NOT NULL
+      ORDER BY blks_hit + blks_read DESC
+    row_limit: 50
+    timeout_s: 10
+
+  - name: seq_scan_heavy_tables
+    surface: db:read
+    kind: sql
+    description: >-
+      Tables taking the most sequential scans relative to index scans. The
+      standard starting point for "which table is missing an index".
+    target: $db
+    params:
+      db:
+        type: enum
+        required: true
+        values: [driver_noncrit, driver_ro, rider_ro]
+        description: Which reader database to query.
+      min_seq_scan:
+        type: int
+        required: false
+        default: 1000
+        min: 0
+        max: 1000000000
+        description: Only report tables with at least this many seq scans.
+    sql: |
+      SELECT schemaname,
+             relname AS table_name,
+             seq_scan,
+             seq_tup_read,
+             idx_scan,
+             n_live_tup,
+             pg_size_pretty(pg_total_relation_size(relid)) AS total_size
+      FROM pg_stat_user_tables
+      WHERE seq_scan >= :min_seq_scan
+      ORDER BY seq_tup_read DESC
+    row_limit: 50
+    timeout_s: 20
+
+  - name: db_size
+    surface: db:read
+    kind: sql
+    description: >-
+      On-disk size of every database on the instance that this role can see,
+      largest first. Databases the read-only role cannot connect to are omitted
+      rather than erroring — on AlloyDB that means internal databases such as
+      `alloydbmetadata` will not appear, so this is not a complete picture of
+      instance storage. For total storage use alloydb_disk_usage on the
+      cloud:gcp surface.
+    target: $db
+    params:
+      db:
+        type: enum
+        required: true
+        values: [driver_noncrit, driver_ro, rider_ro]
+        description: Which reader connection to use.
+    sql: |
+      SELECT datname,
+             pg_size_pretty(pg_database_size(datname)) AS size,
+             pg_database_size(datname) AS size_bytes
+      FROM pg_database
+      WHERE datistemplate = false
+        AND has_database_privilege(datname, 'CONNECT')
+      ORDER BY pg_database_size(datname) DESC
+    row_limit: 50
+    timeout_s: 15
+
+  # ---------------------------------------------------------------------------
+  # Configuration, extensions and vacuum/wraparound metadata.
+  #
+  # A recurring failure mode with these: pg_stat_* counters are PER NODE and are
+  # NOT replicated, while pg_catalog values (pg_settings, pg_class.reltuples,
+  # pg_database.datfrozenxid) either are replicated or describe this node's own
+  # configuration. Reading a replica's pg_stat_* as if it described the writer is
+  # the single most common wrong conclusion on this surface, so each entry below
+  # states which of the two it is.
+  # ---------------------------------------------------------------------------
+
+  - name: pg_settings_key
+    surface: db:read
+    kind: sql
+    description: >-
+      The operationally significant Postgres settings on this reader —
+      max_connections, work_mem, shared_buffers, effective_cache_size,
+      statement_timeout, autovacuum tuning, WAL and standby settings, and
+      shared_preload_libraries — with their current value, unit and source.
+      INTERPRETATION TRAP 1: `setting` is expressed in the `unit` column's units,
+      NOT bytes. shared_buffers comes back in 8kB blocks, work_mem in kB — quote
+      the unit or the number is meaningless (and 16384 "of something" reads as
+      16KB when it is 128MB).
+      INTERPRETATION TRAP 2: these are the settings of THIS READ REPLICA ONLY.
+      The writer and the other replicas are configured independently, so this
+      cannot answer "what is max_connections on the primary".
+      Also useful for confirming what is NOT loaded: shared_preload_libraries is
+      how you verify pg_stat_statements is absent, which is why no historical
+      query-statistics function exists in this registry.
+    target: $db
+    params:
+      db:
+        type: enum
+        required: true
+        values: [driver_noncrit, driver_ro, rider_ro]
+        description: Which reader database to query.
+    sql: |
+      SELECT s.name,
+             s.setting,
+             s.unit,
+             s.source,
+             s.context,
+             s.boot_val,
+             s.reset_val,
+             s.short_desc
+      FROM pg_catalog.pg_settings s
+      WHERE s.name IN (
+              'max_connections',
+              'superuser_reserved_connections',
+              'work_mem',
+              'maintenance_work_mem',
+              'shared_buffers',
+              'effective_cache_size',
+              'random_page_cost',
+              'statement_timeout',
+              'idle_in_transaction_session_timeout',
+              'lock_timeout',
+              'default_transaction_read_only',
+              'max_parallel_workers',
+              'max_parallel_workers_per_gather',
+              'autovacuum',
+              'autovacuum_naptime',
+              'autovacuum_vacuum_cost_limit',
+              'autovacuum_vacuum_scale_factor',
+              'autovacuum_freeze_max_age',
+              'max_wal_size',
+              'wal_keep_size',
+              'hot_standby',
+              'hot_standby_feedback',
+              'max_standby_streaming_delay',
+              'log_min_duration_statement',
+              'shared_preload_libraries'
+            )
+      ORDER BY s.name
+    row_limit: 60
+    timeout_s: 10
+
+  - name: installed_extensions
+    surface: db:read
+    kind: sql
+    description: >-
+      Extensions installed in this database, with version and schema. Use before
+      assuming any extension-provided view exists — pgstattuple, pg_stat_statements
+      and pg_repack all fail with "relation does not exist" rather than a clear
+      error when absent.
+      INTERPRETATION TRAP: installed is not the same as loaded. pg_stat_statements
+      must ALSO appear in shared_preload_libraries (see pg_settings_key) before its
+      view returns anything; an extension row here is necessary, not sufficient.
+      Scope is per-database and per-node: this describes the connected database on
+      this reader, not the writer and not the other database.
+    target: $db
+    params:
+      db:
+        type: enum
+        required: true
+        values: [driver_noncrit, driver_ro, rider_ro]
+        description: Which reader database to query.
+    sql: |
+      SELECT e.extname,
+             e.extversion,
+             n.nspname AS schema_name,
+             e.extrelocatable
+      FROM pg_catalog.pg_extension e
+      JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace
+      ORDER BY e.extname
+    row_limit: 100
+    timeout_s: 10
+
+  - name: oldest_transaction_age
+    surface: db:read
+    kind: sql
+    description: >-
+      Transaction-wraparound and vacuum-horizon risk: the maximum
+      age(datfrozenxid) across databases on this instance, alongside the oldest
+      still-open transactions on this node with their xmin age and query.
+      Compare max_datfrozenxid_age against autovacuum_freeze_max_age (200 million
+      by default, readable via pg_settings_key) and against the 2-billion hard
+      limit — the number alone means nothing without one of those denominators.
+      INTERPRETATION TRAP 1: datfrozenxid IS physically replicated, so the
+      wraparound figure describes the CLUSTER and is trustworthy from a reader.
+      The open-transaction rows are NOT — pg_stat_activity is per node, so these
+      are this replica's own sessions, and a long transaction on the writer will
+      not appear here at all.
+      INTERPRETATION TRAP 2: on a standby with hot_standby_feedback on, a
+      long-running read here DOES pin the primary's vacuum horizon and can be the
+      reason autovacuum is not reclaiming space cluster-wide. With it off, the
+      same query gets cancelled instead. Check the setting before assigning blame.
+    target: $db
+    params:
+      db:
+        type: enum
+        required: true
+        values: [driver_noncrit, driver_ro, rider_ro]
+        description: Which reader database to query.
+      min_seconds:
+        type: int
+        required: false
+        default: 60
+        min: 1
+        max: 86400
+        description: >-
+          Only report open transactions older than this many seconds. Defaults
+          to 60. The wraparound figure is returned regardless.
+    sql: |
+      WITH horizon AS (
+        SELECT max(age(d.datfrozenxid))::bigint AS max_datfrozenxid_age
+        FROM pg_catalog.pg_database d
+        WHERE d.datallowconn
+      ),
+      oldest AS (
+        SELECT a.pid,
+               a.datname,
+               a.usename,
+               a.application_name,
+               a.state,
+               a.backend_xmin,
+               age(a.backend_xmin) AS xmin_age,
+               a.xact_start,
+               extract(epoch FROM (now() - a.xact_start))::int AS xact_age_seconds,
+               left(a.query, 200) AS query
+        FROM pg_stat_activity a
+        WHERE a.xact_start IS NOT NULL
+          AND now() - a.xact_start > (:min_seconds * interval '1 second')
+        ORDER BY a.xact_start ASC
+        LIMIT 25
+      )
+      SELECT h.max_datfrozenxid_age,
+             o.pid,
+             o.datname,
+             o.usename,
+             o.application_name,
+             o.state,
+             o.xmin_age,
+             o.xact_age_seconds,
+             o.query
+      FROM horizon h
+      LEFT JOIN oldest o ON true
+      ORDER BY o.xact_age_seconds DESC NULLS LAST
+    row_limit: 30
+    timeout_s: 15
+
+  - name: vacuum_progress
+    surface: db:read
+    kind: sql
+    description: >-
+      VACUUM operations running right now on THIS node, with phase and heap
+      blocks scanned versus total, so progress can be estimated.
+      INTERPRETATION TRAP — the important one: a read replica does not run
+      VACUUM. On the reader connections this registry uses, this will normally
+      return ZERO ROWS, and zero rows means "no vacuum on this node", NOT "no
+      vacuum running in the cluster" and NOT "vacuum has finished". Autovacuum on
+      the writer is invisible from here. Say that explicitly rather than
+      reporting an empty result as reassurance.
+      Only columns stable across Postgres 13-17 are selected; dead-tuple
+      accounting columns were renamed in 17 and are deliberately omitted so this
+      cannot fail at runtime on a version bump.
+    target: $db
+    params:
+      db:
+        type: enum
+        required: true
+        values: [driver_noncrit, driver_ro, rider_ro]
+        description: Which reader database to query.
+    sql: |
+      SELECT p.pid,
+             p.datname,
+             c.relname AS table_name,
+             p.phase,
+             p.heap_blks_total,
+             p.heap_blks_scanned,
+             p.heap_blks_vacuumed,
+             p.index_vacuum_count,
+             round(
+               100.0 * p.heap_blks_scanned / NULLIF(p.heap_blks_total, 0), 2
+             ) AS percent_scanned,
+             extract(epoch FROM (now() - a.query_start))::int AS running_seconds
+      FROM pg_stat_progress_vacuum p
+      LEFT JOIN pg_catalog.pg_class c ON c.oid = p.relid
+      LEFT JOIN pg_stat_activity a ON a.pid = p.pid
+      ORDER BY p.heap_blks_total DESC NULLS LAST
+    row_limit: 50
+    timeout_s: 15
+
+  - name: table_bloat_estimate
+    surface: db:read
+    kind: sql
+    description: >-
+      Physical size versus the planner's row estimate for the largest tables:
+      on-disk heap pages now, heap pages recorded at the last VACUUM/ANALYZE,
+      the growth between them, and bytes per estimated row.
+      WHAT THIS IS NOT: this is NOT a true bloat measurement. Real bloat needs
+      pgstattuple, which is not installed (confirm with installed_extensions).
+      A high bytes_per_row relative to the table's natural row width, or a large
+      pages_grown_since_analyze, makes a table a CANDIDATE for investigation —
+      it is not evidence of bloat and never justifies a VACUUM FULL on its own.
+      INTERPRETATION TRAP 1: reltuples and relpages are catalogue values written
+      by the last VACUUM/ANALYZE on the WRITER and physically replicated here, so
+      unlike pg_stat_* they are cluster-truthful — but they are only as fresh as
+      that last ANALYZE. Check last_analyze via row_estimate before trusting the
+      derived numbers; on a never-analysed table reltuples is -1 or 0 and
+      bytes_per_row is meaningless.
+      INTERPRETATION TRAP 2: wide TOAST-able columns move out of the heap, so a
+      table with large text/jsonb columns legitimately shows a low bytes_per_row.
+      Sizes here are the main fork only, excluding TOAST and indexes — use
+      table_size for the full picture.
+    target: $db
+    params:
+      db:
+        type: enum
+        required: true
+        values: [driver_noncrit, driver_ro, rider_ro]
+        description: Which reader database to query.
+      min_size_mb:
+        type: int
+        required: false
+        default: 50
+        min: 1
+        max: 1000000
+        description: >-
+          Only consider tables whose main fork is at least this many MB.
+          Defaults to 50 — small tables have no meaningful bloat signal.
+    sql: |
+      SELECT n.nspname AS schema_name,
+             c.relname  AS table_name,
+             c.reltuples::bigint AS estimated_rows,
+             c.relpages::bigint  AS heap_pages_at_last_analyze,
+             (pg_relation_size(c.oid) / 8192)::bigint AS heap_pages_now,
+             ((pg_relation_size(c.oid) / 8192) - c.relpages)::bigint
+               AS pages_grown_since_analyze,
+             round(
+               pg_relation_size(c.oid)::numeric / NULLIF(c.reltuples::numeric, 0), 1
+             ) AS bytes_per_row,
+             pg_size_pretty(pg_relation_size(c.oid))       AS heap_size,
+             pg_size_pretty(pg_total_relation_size(c.oid)) AS total_size
+      FROM pg_catalog.pg_class c
+      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+      WHERE c.relkind IN ('r', 'p', 'm')
+        AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+        AND pg_relation_size(c.oid) >= (:min_size_mb * 1024 * 1024)
+      ORDER BY pg_relation_size(c.oid) DESC
+    row_limit: 50
+    timeout_s: 20

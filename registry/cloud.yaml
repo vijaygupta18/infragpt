@@ -1,0 +1,371 @@
+# Cloud control-plane surface — GCP Monitoring + AlloyDB Admin REST APIs.
+#
+# WHY THIS EXISTS: AlloyDB and Redis are VPC-internal, so the sql/redis surfaces
+# only work from inside the VPC. These APIs are PUBLIC endpoints with IAM auth, so
+# they answer the same operational questions ("is the reader near its connection
+# ceiling?", "how much replication lag?") from anywhere, including during an
+# incident when the VPC path is exactly what is broken.
+#
+# REST, not the gcloud CLI, deliberately: no ~1GB CLI in the container, no second
+# subprocess surface in a tool whose safety story is "no arbitrary commands", and
+# a pinned API version is a contract where beta CLI flags are not.
+#
+# Every entry here is a GET. The Monitoring and AlloyDB Admin APIs used below have
+# no mutating verb reachable from this executor.
+
+connection_hint: >-
+  Targets resolve to named cloud connections in app.config (gcp_monitoring,
+  gcp_alloydb). Project and region are config, never LLM-supplied.
+
+entries:
+  - name: alloydb_connections
+    surface: cloud:gcp
+    kind: gcpmetric
+    description: >-
+      Current connection count per AlloyDB instance. Works without a VPC route,
+      unlike the sql surface. Returns every instance in the project (driver and
+      rider clusters, primaries and read pools).
+      CRITICAL: for a READ POOL this value is the TOTAL ACROSS ALL LIVE NODES,
+      whereas alloydb_connection_limit is PER NODE. Dividing one by the other
+      without first calling alloydb_instances for the live node count produces a
+      wildly wrong utilisation figure (e.g. 1432 total over 20 nodes reads as
+      143% of a 1000 limit, when the true figure is ~7% per node). ALWAYS fetch
+      alloydb_instances and divide by live_nodes before stating a percentage.
+    target: gcp_monitoring
+    metric: alloydb.googleapis.com/instance/postgres/total_connections
+    params:
+      window:
+        type: duration
+        required: false
+        default: 15m
+        description: Look-back window, e.g. 15m, 1h, 6h. Defaults to 15m.
+    row_limit: 50
+    timeout_s: 25
+
+  - name: alloydb_connection_limit
+    surface: cloud:gcp
+    kind: gcpmetric
+    description: >-
+      The maximum connections PER NODE for each AlloyDB instance. To express
+      utilisation you need three numbers, not two: alloydb_connections (total
+      across nodes), this limit (per node), and live_nodes from
+      alloydb_instances. Utilisation = total / (limit * live_nodes).
+    target: gcp_monitoring
+    metric: alloydb.googleapis.com/instance/postgres/connections_limit
+    params:
+      window:
+        type: duration
+        required: false
+        default: 15m
+        description: Look-back window. Defaults to 15m.
+    row_limit: 50
+    timeout_s: 25
+
+  - name: alloydb_replication_lag
+    surface: cloud:gcp
+    kind: gcpmetric
+    description: >-
+      Maximum replication lag per AlloyDB instance. State the unit exactly as the
+      API reports it and do not convert or characterise it (a number without its
+      unit is how "1" and "109" get read as the same kind of thing).
+    target: gcp_monitoring
+    metric: alloydb.googleapis.com/instance/postgres/replication/maximum_lag
+    params:
+      window:
+        type: duration
+        required: false
+        default: 15m
+        description: Look-back window. Defaults to 15m.
+    row_limit: 50
+    timeout_s: 25
+
+  - name: alloydb_cpu
+    surface: cloud:gcp
+    kind: gcpmetric
+    description: >-
+      Average CPU utilisation per AlloyDB instance, as a fraction (0-1). High CPU
+      with flat latency is healthy; flat CPU with rising latency means the
+      database is waiting on something else.
+    target: gcp_monitoring
+    metric: alloydb.googleapis.com/instance/cpu/average_utilization
+    params:
+      window:
+        type: duration
+        required: false
+        default: 15m
+        description: Look-back window. Defaults to 15m.
+    row_limit: 50
+    timeout_s: 25
+
+  - name: alloydb_memory_available
+    surface: cloud:gcp
+    kind: gcpmetric
+    description: >-
+      Minimum available memory per AlloyDB instance, in bytes. A sustained fall
+      here often precedes a cache-hit-ratio drop.
+    target: gcp_monitoring
+    metric: alloydb.googleapis.com/instance/memory/min_available_memory
+    params:
+      window:
+        type: duration
+        required: false
+        default: 15m
+        description: Look-back window. Defaults to 15m.
+    row_limit: 50
+    timeout_s: 25
+
+  - name: alloydb_backends_by_state
+    surface: cloud:gcp
+    kind: gcpmetric
+    description: >-
+      Backend counts broken down by state (active, idle, idle in transaction).
+      A large "idle in transaction" count is an application bug, not load — those
+      sessions hold both a connection and any locks they have taken.
+    target: gcp_monitoring
+    metric: alloydb.googleapis.com/instance/postgresql/backends_by_state
+    params:
+      window:
+        type: duration
+        required: false
+        default: 15m
+        description: Look-back window. Defaults to 15m.
+    row_limit: 100
+    timeout_s: 25
+
+  - name: alloydb_instances
+    surface: cloud:gcp
+    kind: gcpalloydb
+    description: >-
+      Inventory of AlloyDB instances: type (PRIMARY / READ_POOL), vCPU count,
+      state, and crucially `live_nodes` — the CURRENT number of read-pool nodes,
+      read from the live nodes array, not the autoscaler floor. Also returns
+      autoscale_floor, autoscale_max and at_autoscale_ceiling.
+      Call this BEFORE quoting any per-node figure for a read pool: read-pool
+      metrics are totals across live nodes, and `autoscale_floor` (what the v1
+      API calls nodeCount) is NOT the live count. A pool where
+      at_autoscale_ceiling is true has no headroom left to scale out.
+    target: gcp_alloydb
+    params: {}
+    row_limit: 50
+    timeout_s: 25
+
+  - name: alloydb_disk_usage
+    surface: cloud:gcp
+    kind: gcpmetric
+    description: >-
+      Billable storage consumed by each AlloyDB CLUSTER, in bytes. Metric type
+      alloydb.googleapis.com/cluster/storage/usage — verified against the AlloyDB
+      system-insights metric reference, not inferred.
+      INTERPRETATION TRAP 1: this is CLUSTER-scoped, not instance-scoped. The
+      result labels a cluster, so it cannot be attributed to a primary, a read
+      pool, or an individual node — do not pair it with a per-instance figure as
+      though they described the same object.
+      INTERPRETATION TRAP 2: AlloyDB storage is elastic and has no provisioned
+      disk size, so there is NO capacity denominator here. This can never be
+      expressed as "percent full" or "N GB remaining"; report the absolute number
+      and its growth rate only. Backups are excluded from this figure, so it does
+      not explain a storage bill on its own.
+    target: gcp_monitoring
+    metric: alloydb.googleapis.com/cluster/storage/usage
+    params:
+      window:
+        type: duration
+        required: false
+        default: 1h
+        description: >-
+          Look-back window, e.g. 1h, 6h, 7d. Storage moves slowly — a 15m window
+          usually shows a flat line and says nothing about growth.
+    row_limit: 50
+    timeout_s: 25
+
+  # ---------------------------------------------------------------------------
+  # DISCOVERY + GENERIC QUERY
+  #
+  # This project exposes ~2000 metric descriptors and that is only the first
+  # page — kubernetes.io, redis.googleapis.com, loadbalancing and router (Cloud
+  # NAT) all sit beyond it. Enumerating them as individual registry entries is
+  # unwinnable; the seven AlloyDB entries above are a rounding error against what
+  # exists.
+  #
+  # So instead: search for a metric type, then query it. This pair makes EVERY
+  # GCP metric reachable — GKE, Memorystore, load balancers, Cloud NAT, PSC,
+  # BigQuery — without adding an entry per metric. Both are GETs against the
+  # Monitoring API and carry no more privilege than the entries above.
+  # ---------------------------------------------------------------------------
+
+  - name: gcp_metric_search
+    surface: cloud:gcp
+    kind: gcpmetricsearch
+    description: >-
+      Find GCP metric TYPES whose name contains a substring. Returns metric
+      names, units and which resource types they apply to — never values.
+      Call this FIRST whenever you are not certain of an exact metric type, then
+      pass the result to gcp_metric_query. Do not guess a metric type: an unknown
+      one returns an error, and a plausible-looking guess is how a question gets
+      answered about the wrong thing. Useful prefixes: kubernetes.io (GKE),
+      redis.googleapis.com (Memorystore), alloydb.googleapis.com,
+      loadbalancing.googleapis.com, router.googleapis.com (Cloud NAT),
+      compute.googleapis.com.
+    target: gcp_monitoring
+    params:
+      contains:
+        type: string
+        required: true
+        max_length: 120
+        description: >-
+          Substring to look for in the metric type, e.g. "connection",
+          "kubernetes.io/container/memory", "nat". Matching is on the metric
+          NAME only, so a metric may exist under wording you have not guessed —
+          prefer a short, distinctive fragment.
+      limit:
+        type: int
+        required: false
+        default: 40
+        min: 1
+        max: 200
+        description: Maximum metric types to return. Defaults to 40.
+    row_limit: 200
+    timeout_s: 25
+
+  - name: gcp_metric_query
+    surface: cloud:gcp
+    kind: gcpmetricquery
+    description: >-
+      Query ANY GCP metric by its exact type. Works without a VPC route, so it
+      answers during an incident where the VPC path is itself what is broken.
+      Returns one aligned value per time series with its unit.
+      Get the exact type from gcp_metric_search first unless you are certain of
+      it. Two things to state in any answer: the UNIT exactly as reported (a bare
+      number invites a wrong reading), and that NO SERIES RETURNED means no data,
+      not zero. For an AlloyDB read pool remember the values are totals across
+      live nodes — divide by live_nodes from alloydb_instances before quoting a
+      per-node figure.
+    target: gcp_monitoring
+    params:
+      metric_type:
+        type: string
+        required: true
+        max_length: 200
+        description: >-
+          Fully-qualified metric type, e.g.
+          kubernetes.io/container/memory/used_bytes or
+          redis.googleapis.com/stats/memory/usage_ratio.
+      window:
+        type: duration
+        required: false
+        default: 15m
+        description: Look-back window, e.g. 15m, 1h, 6h, 7d. Defaults to 15m.
+      aligner:
+        type: enum
+        required: false
+        default: ALIGN_MEAN
+        values: [ALIGN_MEAN, ALIGN_MAX, ALIGN_MIN, ALIGN_RATE, ALIGN_SUM]
+        description: >-
+          How samples are combined within the window. ALIGN_MEAN for levels,
+          ALIGN_MAX to catch peaks a mean would hide, ALIGN_RATE for counters
+          (a counter read as a level is meaningless).
+    row_limit: 100
+    timeout_s: 25
+
+  # ---- Query Insights: per-query time attribution -------------------------
+  #
+  # This answers the question the runbooks used to call unanswerable. There is
+  # no pg_stat_statements on this AlloyDB, so "which queries are burning CPU"
+  # had no source — until it turned out Query Insights had been recording it all
+  # along and the generic metric reader was querying it the wrong way.
+  - name: query_insights_top
+    surface: cloud:gcp
+    kind: gcpinsights
+    metric: execution_time
+    description: >-
+      TOP QUERIES BY EXECUTION TIME, with the actual SQL. This is the answer to
+      "which queries are slow", "what is burning database CPU", "what changed in
+      the database" — and it works on HISTORY, not just what is running now.
+
+      USE THIS FIRST for any query-performance question. It supersedes the old
+      advice that per-query attribution is impossible here: that was true of
+      pg_stat_statements, which is not installed, but Query Insights records the
+      same thing and is on by default. Verified 2026-08-20.
+
+      Totals are summed over the window across all executions, so a query
+      appearing high may be moderately slow and very frequent rather than
+      individually slow. Say which: `long_running_queries` shows what is slow
+      right now, this shows what consumed the most time overall.
+
+      The SQL is normalised, so literals appear as $1/$2 — that is the query
+      SHAPE, and two calls differing only in parameters are one row here.
+    target: gcp_monitoring
+    params:
+      window:
+        type: enum
+        required: false
+        default: 1h
+        values: [15m, 30m, 1h, 6h, 24h]
+        description: >-
+          How far back to sum. 1h for "what is happening now", 24h to find what
+          is expensive in aggregate.
+      top:
+        type: int
+        required: false
+        default: 10
+        min: 1
+        max: 30
+        description: How many queries to return, most expensive first.
+    row_limit: 30
+    timeout_s: 30
+
+  - name: query_insights_io
+    surface: cloud:gcp
+    kind: gcpinsights
+    metric: io_time
+    description: >-
+      Top queries by I/O TIME. Use when CPU looks moderate but the database
+      still feels slow — a query dominating here is waiting on disk rather than
+      computing, which points at a missing index or a table too large for cache
+      rather than at an expensive expression.
+
+      Compare with query_insights_top: a query high in both is simply heavy; high
+      in I/O but not execution is a read-pattern problem.
+    target: gcp_monitoring
+    params:
+      window:
+        type: enum
+        required: false
+        default: 1h
+        values: [15m, 30m, 1h, 6h, 24h]
+        description: How far back to sum.
+      top:
+        type: int
+        required: false
+        default: 10
+        min: 1
+        max: 30
+        description: How many queries to return.
+    row_limit: 30
+    timeout_s: 30
+
+  - name: query_insights_locks
+    surface: cloud:gcp
+    kind: gcpinsights
+    metric: lock_time
+    description: >-
+      Top queries by LOCK WAIT time. Use for "the database is slow but nothing
+      looks busy" — lock waits show as latency with no matching CPU or I/O, and
+      are invisible to every other metric here.
+    target: gcp_monitoring
+    params:
+      window:
+        type: enum
+        required: false
+        default: 1h
+        values: [15m, 30m, 1h, 6h, 24h]
+        description: How far back to sum.
+      top:
+        type: int
+        required: false
+        default: 10
+        min: 1
+        max: 30
+        description: How many queries to return.
+    row_limit: 30
+    timeout_s: 30

@@ -1,0 +1,228 @@
+# infragpt registry — PLATFORM AND BUSINESS METRICS.
+#
+# These metric names are VERIFIED against this metrics store, not inferred from
+# what a service of this kind usually exposes. That distinction matters more
+# here than anywhere else in the registry: a wrong metric name returns an empty
+# series, an empty series looks like zero, and zero looks like health. Every
+# guessed name in a monitoring tool is a silent false negative waiting for an
+# incident.
+#
+# So: do not "fix" a name here because it looks unconventional, and do not add
+# a sibling by pattern-matching off one that works. Confirm with `metric_names`
+# against the live store first.
+#
+# The drainer is the piece to understand before reading these. Writes go to
+# Redis (KV) and the drainer moves them to Postgres. When it stops, the app
+# keeps working and the database quietly stops receiving writes — which is why
+# "everything looks fine but the data is old" is a drainer question, and why
+# there are separate counters for the rider and driver sides.
+
+entries:
+  # -- drainer: the KV -> Postgres pipeline ---------------------------------
+  - name: drainer_throughput
+    surface: metrics
+    kind: promql
+    description: >-
+      Rate of drainer query executions — whether the KV-to-Postgres pipeline is
+      actually moving data. Use for "is the drainer running", "is data not
+      reaching the database", or any report that a write is missing from
+      Postgres while the app behaves normally.
+
+      READ IT AS: flat or zero means NOT PROCESSING. A non-zero steady rate is
+      healthy. This counter tells you nothing about whether the drainer process
+      is up — a stopped drainer and a drainer with no work both read as zero, so
+      pair it with drainer_stopped.
+
+      SIDES ARE SEPARATE. The rider/customer side and the driver side have their
+      own drainers and their own counters; one being healthy says nothing about
+      the other. Always say which side you checked.
+    target: metrics
+    promql: >-
+      sum(rate($metric[$window]))
+    params:
+      metric:
+        type: enum
+        required: true
+        values: [drainer_query_executes, driver_drainer_query_executes]
+        description: >-
+          drainer_query_executes is the rider/customer (BAP) drainer;
+          driver_drainer_query_executes is the driver (BPP) drainer.
+      window:
+        type: enum
+        required: false
+        default: 15m
+        values: [5m, 15m, 30m, 1h, 6h, 24h]
+        description: Rate window. Use 1h+ before calling a drainer stopped.
+    timeout_s: 25
+
+  - name: drainer_stopped
+    surface: metrics
+    kind: promql
+    description: >-
+      Whether the drainer reports itself STOPPED. Non-zero / not-running means
+      stopped. This is the direct answer to "is the drainer running", where
+      drainer_throughput only answers "is it doing anything".
+
+      Check both together: stopped=0 with throughput=0 means it is up with no
+      work (or its input has dried up upstream); stopped!=0 means it is down and
+      Postgres is falling behind right now.
+    target: metrics
+    promql: >-
+      max($metric)
+    params:
+      metric:
+        type: enum
+        required: true
+        values: [drainer_stop_status, driver_drainer_stop_status]
+        description: >-
+          drainer_stop_status is the rider/customer side, driver_drainer_stop_status
+          the driver side.
+    timeout_s: 25
+
+  - name: drainer_lag
+    surface: metrics
+    kind: promql
+    description: >-
+      p99 drainer queue latency — how far behind Postgres is. Use when the
+      drainer is running but data looks stale, and to judge whether a backlog is
+      draining or growing.
+
+      A rising p99 with healthy throughput means more work arriving than the
+      drainer can clear, which is a capacity problem rather than a fault.
+    target: metrics
+    promql: >-
+      histogram_quantile(0.99, sum(rate(queue_drainer_latency_bucket[$window])) by (le))
+    params:
+      window:
+        type: enum
+        required: false
+        default: 15m
+        values: [5m, 15m, 30m, 1h, 6h, 24h]
+        description: Rate window.
+    timeout_s: 25
+
+  # -- producer -------------------------------------------------------------
+  - name: producer_throughput
+    surface: metrics
+    kind: promql
+    description: >-
+      Rate of producer operations. A flat rate means nothing is being produced,
+      which starves everything downstream — check this before concluding that a
+      consumer is broken, because an idle consumer with no input looks identical
+      to a stuck one.
+    target: metrics
+    promql: >-
+      sum(rate(producer_operation_duration_count[$window]))
+    params:
+      window:
+        type: enum
+        required: false
+        default: 15m
+        values: [5m, 15m, 30m, 1h, 6h, 24h]
+        description: Rate window.
+    timeout_s: 25
+
+  # -- business health ------------------------------------------------------
+  - name: ride_to_search_ratio
+    surface: metrics
+    kind: promql
+    description: >-
+      Rides created per search — the single best whole-system health signal,
+      because it degrades when ANY link in the funnel breaks, including links
+      that are individually reporting themselves healthy.
+
+      READ IT AS a change against its own recent baseline, never as an absolute:
+      a "good" ratio is time-of-day and city dependent, so a number without a
+      comparison is not evidence. A sharp drop with steady search volume means
+      searches are arriving and not converting — look at the BPP side, the
+      allocator, and on_search/on_confirm failures. A drop in BOTH means demand
+      changed, or the rider app is not reaching the platform at all.
+    target: metrics
+    promql: >-
+      sum(rate(ride_created_count[$window]))
+      /
+      clamp_min(sum(rate(beckn_search_round_trip_count[$window])), 1e-9)
+    params:
+      window:
+        type: enum
+        required: false
+        default: 30m
+        values: [15m, 30m, 1h, 6h, 24h]
+        description: >-
+          Rate window. Wider than elsewhere on purpose — this ratio is noisy at
+          5m and a spike there means nothing.
+    timeout_s: 25
+
+  - name: search_volume
+    surface: metrics
+    kind: promql
+    description: >-
+      Search round-trip rate, with BPP search failures alongside. Use to
+      establish whether demand is arriving at all before interpreting any
+      conversion or allocation metric — every downstream ratio is meaningless
+      when the denominator has collapsed.
+    target: metrics
+    promql: >-
+      sum by (__name__) (rate({__name__=~"beckn_search_round_trip_count|BPP_search_failure_counter|beckn_search_frfs_round_trip_count"}[$window]))
+    params:
+      window:
+        type: enum
+        required: false
+        default: 15m
+        values: [5m, 15m, 30m, 1h, 6h, 24h]
+        description: Rate window.
+    timeout_s: 25
+
+  - name: config_decode_failures
+    surface: metrics
+    kind: promql
+    description: >-
+      Rate of KV config decode failures. This is the metric that tells you a
+      config or deploy push broke something.
+
+      INTERPRETATION, and it is the whole point of this entry: a LOW STEADY rate
+      is baseline Redis-decode noise and is not worth investigating. A SHARP
+      RISE right after a config push or a deploy is real and is almost certainly
+      the cause of whatever else you are looking at. Always state which of the
+      two you are seeing — reporting the baseline as an incident is the standard
+      false positive here.
+    target: metrics
+    promql: >-
+      sum(rate($metric[$window]))
+    params:
+      metric:
+        type: enum
+        required: true
+        values: [rider_kv_config_decode_failure, driver_kv_config_decode_failure]
+        description: >-
+          rider_kv_config_decode_failure is the customer/BAP side,
+          driver_kv_config_decode_failure the driver/BPP side.
+      window:
+        type: enum
+        required: false
+        default: 15m
+        values: [5m, 15m, 30m, 1h, 6h, 24h]
+        description: Rate window.
+    timeout_s: 25
+
+  # -- app-level HTTP, where a service instruments itself --------------------
+  - name: app_request_latency_p99
+    surface: metrics
+    kind: promql
+    description: >-
+      p99 application request latency from the app's own histogram, by workload.
+      Use alongside the Istio view: Istio measures what the mesh saw, this
+      measures what the application thinks it did. A large gap between them is
+      itself the finding — time being spent in the proxy or the network rather
+      than in the handler.
+    target: metrics
+    promql: >-
+      histogram_quantile(0.99, sum(rate(api_http_requests_duration_seconds_bucket[$window])) by (le, destination_workload))
+    params:
+      window:
+        type: enum
+        required: false
+        default: 15m
+        values: [5m, 15m, 30m, 1h, 6h, 24h]
+        description: Rate window.
+    timeout_s: 25

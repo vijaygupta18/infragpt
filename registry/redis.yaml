@@ -1,0 +1,261 @@
+# infragpt registry — Redis surface (READ-ONLY PRIMITIVES ONLY)
+#
+# HARD RULE: KEYS is not expressible here, and must never become expressible.
+# It is O(N) against a production keyspace and is the classic way to stall a
+# Redis. SCAN is likewise absent from v1; if it is ever added it needs a hard
+# COUNT cap and a MATCH prefix that is not attacker-chosen.
+#
+# The executor keeps its own allowlist of redis_op values and rejects anything
+# outside it even if this file says otherwise (defence in depth). Adding an op
+# here alone is not enough to make it runnable.
+#
+# Redis is per-cloud and NEVER replicated between GCP and AWS: the same logical
+# key can exist in one cloud and not the other, or hold different values. Every
+# entry therefore takes an explicit `cloud` — there is no default, and answers
+# must always state which cloud was read.
+#
+# Values returned by get/hgetall/smembers CAN contain PII, so the redactor
+# applies in full on this surface.
+
+entries:
+  - name: redis_exists
+    surface: redis:read
+    kind: redis
+    redis_op: exists
+    description: >-
+      Whether a key exists (1) or not (0) in the given cloud's Redis. Use this
+      first when diagnosing cross-cloud cache staleness — check both clouds.
+    target: redis_$cloud
+    params:
+      key:
+        type: key
+        required: true
+        description: Exact Redis key. Globs and wildcards are not permitted.
+      cloud:
+        type: enum
+        required: false
+        default: gcp
+        values: [gcp, aws]
+        description: >-
+          Which cloud. DEFAULTS TO GCP and you should almost always leave it
+          there: this platform is migrating to GCP, and AWS is only worth
+          querying when the question NAMES it. Do not check both "to be safe" —
+          that doubles the cost of every question and, for surfaces AWS cannot
+          reach, produces a failure that reads like a fact about production.
+    timeout_s: 5
+
+  - name: redis_ttl
+    surface: redis:read
+    kind: redis
+    redis_op: ttl
+    description: >-
+      Remaining TTL of a key in seconds. -1 means no expiry set, -2 means the
+      key does not exist.
+    target: redis_$cloud
+    params:
+      key:
+        type: key
+        required: true
+        description: Exact Redis key.
+      cloud:
+        type: enum
+        required: false
+        default: gcp
+        values: [gcp, aws]
+        description: >-
+          Which cloud. DEFAULTS TO GCP and you should almost always leave it
+          there: this platform is migrating to GCP, and AWS is only worth
+          querying when the question NAMES it. Do not check both "to be safe" —
+          that doubles the cost of every question and, for surfaces AWS cannot
+          reach, produces a failure that reads like a fact about production.
+    timeout_s: 5
+
+  - name: redis_get
+    surface: redis:read
+    kind: redis
+    redis_op: get
+    description: >-
+      Value of a string key. Returns null if the key is missing or holds a
+      non-string type — use redis_type first if unsure. Output is PII-redacted.
+    target: redis_$cloud
+    tags: [pii]
+    params:
+      key:
+        type: key
+        required: true
+        description: Exact Redis key.
+      cloud:
+        type: enum
+        required: false
+        default: gcp
+        values: [gcp, aws]
+        description: >-
+          Which cloud. DEFAULTS TO GCP and you should almost always leave it
+          there: this platform is migrating to GCP, and AWS is only worth
+          querying when the question NAMES it. Do not check both "to be safe" —
+          that doubles the cost of every question and, for surfaces AWS cannot
+          reach, produces a failure that reads like a fact about production.
+    timeout_s: 5
+
+  - name: redis_type
+    surface: redis:read
+    kind: redis
+    redis_op: type
+    description: >-
+      Redis data type of a key (string, list, set, hash, zset, stream, none).
+    target: redis_$cloud
+    params:
+      key:
+        type: key
+        required: true
+        description: Exact Redis key.
+      cloud:
+        type: enum
+        required: false
+        default: gcp
+        values: [gcp, aws]
+        description: >-
+          Which cloud. DEFAULTS TO GCP and you should almost always leave it
+          there: this platform is migrating to GCP, and AWS is only worth
+          querying when the question NAMES it. Do not check both "to be safe" —
+          that doubles the cost of every question and, for surfaces AWS cannot
+          reach, produces a failure that reads like a fact about production.
+    timeout_s: 5
+
+  - name: redis_smembers
+    surface: redis:read
+    kind: redis
+    redis_op: smembers
+    description: >-
+      All members of a set key. Result is capped by row_limit. Output is
+      PII-redacted.
+    target: redis_$cloud
+    tags: [pii]
+    params:
+      key:
+        type: key
+        required: true
+        description: Exact Redis set key.
+      cloud:
+        type: enum
+        required: false
+        default: gcp
+        values: [gcp, aws]
+        description: >-
+          Which cloud. DEFAULTS TO GCP and you should almost always leave it
+          there: this platform is migrating to GCP, and AWS is only worth
+          querying when the question NAMES it. Do not check both "to be safe" —
+          that doubles the cost of every question and, for surfaces AWS cannot
+          reach, produces a failure that reads like a fact about production.
+    row_limit: 200
+    timeout_s: 10
+
+  - name: redis_hgetall
+    surface: redis:read
+    kind: redis
+    redis_op: hgetall
+    description: >-
+      All field/value pairs of a hash key. Result is capped by row_limit.
+      Output is PII-redacted.
+    target: redis_$cloud
+    tags: [pii]
+    params:
+      key:
+        type: key
+        required: true
+        description: Exact Redis hash key.
+      cloud:
+        type: enum
+        required: false
+        default: gcp
+        values: [gcp, aws]
+        description: >-
+          Which cloud. DEFAULTS TO GCP and you should almost always leave it
+          there: this platform is migrating to GCP, and AWS is only worth
+          querying when the question NAMES it. Do not check both "to be safe" —
+          that doubles the cost of every question and, for surfaces AWS cannot
+          reach, produces a failure that reads like a fact about production.
+    row_limit: 200
+    timeout_s: 10
+
+  - name: redis_scard
+    surface: redis:read
+    kind: redis
+    redis_op: scard
+    description: Number of members in a set key, without fetching them.
+    target: redis_$cloud
+    params:
+      key:
+        type: key
+        required: true
+        description: Exact Redis set key.
+      cloud:
+        type: enum
+        required: false
+        default: gcp
+        values: [gcp, aws]
+        description: >-
+          Which cloud. DEFAULTS TO GCP and you should almost always leave it
+          there: this platform is migrating to GCP, and AWS is only worth
+          querying when the question NAMES it. Do not check both "to be safe" —
+          that doubles the cost of every question and, for surfaces AWS cannot
+          reach, produces a failure that reads like a fact about production.
+    timeout_s: 5
+
+  - name: redis_llen
+    surface: redis:read
+    kind: redis
+    redis_op: llen
+    description: Length of a list key, without fetching its elements.
+    target: redis_$cloud
+    params:
+      key:
+        type: key
+        required: true
+        description: Exact Redis list key.
+      cloud:
+        type: enum
+        required: false
+        default: gcp
+        values: [gcp, aws]
+        description: >-
+          Which cloud. DEFAULTS TO GCP and you should almost always leave it
+          there: this platform is migrating to GCP, and AWS is only worth
+          querying when the question NAMES it. Do not check both "to be safe" —
+          that doubles the cost of every question and, for surfaces AWS cannot
+          reach, produces a failure that reads like a fact about production.
+    timeout_s: 5
+
+  - name: redis_memory_usage
+    surface: redis:read
+    kind: redis
+    redis_op: memory_usage
+    description: >-
+      Approximate memory in bytes consumed by a single key, including
+      overheads. Use to find outsized cache entries.
+    target: redis_$cloud
+    params:
+      key:
+        type: key
+        required: true
+        description: Exact Redis key.
+      cloud:
+        type: enum
+        required: false
+        default: gcp
+        values: [gcp, aws]
+        description: >-
+          Which cloud. DEFAULTS TO GCP and you should almost always leave it
+          there: this platform is migrating to GCP, and AWS is only worth
+          querying when the question NAMES it. Do not check both "to be safe" —
+          that doubles the cost of every question and, for surfaces AWS cannot
+          reach, produces a failure that reads like a fact about production.
+    timeout_s: 5
+
+# REMOVED 2026-08-18: `redis_info`.
+#
+# This surface is now strictly KEY-LEVEL reads — get, type, ttl, exists, smembers,
+# hgetall, scard, llen, memory_usage. INFO is a server-level statistic, and
+# server-level Redis health belongs on the metrics surface (Memorystore metrics
+# via gcp_metric_query), not here. Keeping the boundary sharp means a `redis:read`
+# grant means exactly one thing: "may look up a key".

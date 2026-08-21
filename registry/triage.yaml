@@ -1,0 +1,304 @@
+# infragpt registry — API ERROR TRIAGE.
+#
+# The chain this file exists to make possible, end to end:
+#
+#   "which APIs are throwing errors, and what are the errors?"
+#     1. metrics  -> which routes are returning 5xx, and at what rate
+#     2. metrics  -> which response codes specifically (502 != 503 != 504)
+#     3. logs     -> the request ids of those failing requests
+#     4. logs     -> every log line carrying that request id, across services
+#
+# Step 4 is the one that makes this worth building. A request id is the only
+# thing that ties a 5xx seen at the edge to the exception that caused it three
+# services deeper, and joining those by hand across two clouds is exactly the
+# work that gets escalated to one of two people.
+#
+# WHICH METRIC, and why these exact names: `istio_requests_total` grouped by
+# `destination_workload` is what is actually used against this metrics store in
+# production. It is NOT `destination_service_name` — that is the label a generic
+# Istio guide would tell you to use, and it produces an empty result here, which
+# reads as "no errors" rather than as "wrong label".
+#
+# The `reporter` label is deliberately NOT filtered for the same reason. Both
+# ends of a call report, so totals double-count, but ranking and ratios are
+# unaffected — and an empty result from an over-specific matcher is far more
+# dangerous during an incident than a doubled counter.
+#
+# App-level equivalent, where a service instruments itself:
+# `api_http_requests_duration_seconds_count` (with `_bucket` / `_sum`). Prefer
+# Istio for "which API is failing" — it covers every service in the mesh,
+# including the ones with no metrics of their own, which are disproportionately
+# the ones breaking.
+#
+# If an entry here returns nothing, check the workload name before concluding
+# anything: `api_error_rates` with no filter lists what actually exists, and
+# `metric_names` shows what the store holds. An empty result is not evidence of
+# no errors.
+
+entries:
+  # -- step 1: which APIs are failing ---------------------------------------
+  - name: api_error_rates
+    surface: metrics
+    kind: promql
+    description: >-
+      THE STARTING POINT for "which APIs are throwing errors". Returns the
+      services with the highest 5xx rate over a window, ranked, from Istio mesh
+      telemetry — so it covers every service in the mesh, not only the ones
+      that instrument themselves.
+
+      Returns a RATE (requests/second), not a count. A service with a high rate
+      and low traffic may matter less than a lower rate on a high-traffic path,
+      so follow with api_error_ratio before concluding what is worst.
+
+      NEXT STEPS once you have the failing service: api_error_codes to see
+      WHICH 5xx, then error_request_ids to get request ids, then
+      logs_for_request_id to read what actually happened.
+    target: metrics
+    promql: >-
+      topk($top, sum by (destination_workload) (
+        rate(istio_requests_total{response_code=~"5.."}[$window])
+      ))
+    params:
+      window:
+        type: enum
+        required: false
+        default: 15m
+        values: [5m, 15m, 30m, 1h, 6h, 24h]
+        description: >-
+          Rate window. 15m is the useful default during an incident; 1h+ to
+          tell an ongoing problem from a spike that already ended.
+      top:
+        type: int
+        required: false
+        default: 10
+        min: 1
+        max: 30
+        description: How many services to return, worst first.
+    timeout_s: 25
+
+  - name: api_error_ratio
+    surface: metrics
+    kind: promql
+    description: >-
+      What FRACTION of one service's requests are 5xx. Use after
+      api_error_rates to judge severity: 2 errors/sec is a catastrophe on a
+      service doing 3 requests/sec and noise on one doing 3000.
+
+      Returns 0 when the service is healthy and has traffic. Returns nothing at
+      all when the label value does not match anything — which means the name is
+      wrong, NOT that the service is fine. Check the name with api_error_rates.
+    target: metrics
+    promql: >-
+      sum(rate(istio_requests_total{destination_workload="$service",response_code=~"5.."}[$window]))
+      /
+      clamp_min(sum(rate(istio_requests_total{destination_workload="$service"}[$window])), 1e-9)
+    params:
+      service:
+        type: string
+        required: true
+        max_length: 96
+        description: >-
+          Istio destination service name, exactly as api_error_rates returned
+          it. Usually the k8s Service name.
+      window:
+        type: enum
+        required: false
+        default: 15m
+        values: [5m, 15m, 30m, 1h, 6h, 24h]
+        description: Rate window.
+    timeout_s: 25
+
+  # -- step 2: which errors, specifically ------------------------------------
+  - name: api_error_codes
+    surface: metrics
+    kind: promql
+    description: >-
+      Break one service's errors down BY RESPONSE CODE. This is the step that
+      decides where to look next, because the codes mean different things:
+
+      - 502 / 503: the upstream was unreachable or had no healthy endpoints —
+        look at pods, readiness and the destination's own health, not at
+        application logs.
+      - 504: the upstream was reached and did not answer in time — look at the
+        slow dependency (database, cache, downstream service), not at the mesh.
+      - 500: the application itself raised. THIS is the one where the logs hold
+        the answer — go to error_request_ids next.
+
+      Say which code dominates in any answer. "The service is throwing 5xx" is
+      not actionable; "it is all 504s to one upstream" is.
+    target: metrics
+    promql: >-
+      sum by (response_code) (
+        rate(istio_requests_total{destination_workload="$service",response_code=~"5.."}[$window])
+      )
+    params:
+      service:
+        type: string
+        required: true
+        max_length: 96
+        description: >-
+          The `destination_workload` value, exactly as api_error_rates returned it.
+      window:
+        type: enum
+        required: false
+        default: 15m
+        values: [5m, 15m, 30m, 1h, 6h, 24h]
+        description: Rate window.
+    timeout_s: 25
+
+  - name: api_error_routes
+    surface: metrics
+    kind: promql
+    description: >-
+      WHICH ENDPOINT of a service is failing, not just that the service is.
+      Breaks 5xx down by the request's route/operation label.
+
+      Note the cardinality caveat: Istio only carries a useful route label when
+      the mesh is configured for it. If this returns a single "unknown" bucket,
+      the mesh is not labelling routes and you must get the path from the logs
+      instead — error_request_ids returns them alongside the ids.
+    target: metrics
+    promql: >-
+      topk($top, sum by (request_operation, request_protocol) (
+        rate(istio_requests_total{destination_workload="$service",response_code=~"5.."}[$window])
+      ))
+    params:
+      service:
+        type: string
+        required: true
+        max_length: 96
+        description: >-
+          The `destination_workload` value, exactly as api_error_rates returned it.
+      window:
+        type: enum
+        required: false
+        default: 15m
+        values: [5m, 15m, 30m, 1h, 6h, 24h]
+        description: Rate window.
+      top:
+        type: int
+        required: false
+        default: 10
+        min: 1
+        max: 30
+        description: How many routes to return.
+    timeout_s: 25
+
+  - name: api_error_callers
+    surface: metrics
+    kind: promql
+    description: >-
+      WHO is getting the errors — the calling workloads, ranked. Use to tell a
+      failure affecting everything from one badly-behaved caller, and to find
+      the blast radius before deciding how urgent something is.
+
+      Groups by source_workload, so it answers "who is affected" rather than
+      "what is broken". If one caller dominates, the problem is often that
+      caller's usage rather than the service itself.
+
+      This one does NOT filter on `reporter`, like the others here — an
+      over-specific matcher returning nothing looks exactly like "no errors",
+      which is the failure mode to avoid during an incident. The consequence is
+      that a call reported by both ends is counted twice; the ranking, which is
+      what this is for, is unaffected.
+    target: metrics
+    promql: >-
+      topk($top, sum by (source_workload, destination_workload) (
+        rate(istio_requests_total{destination_workload="$service",response_code=~"5.."}[$window])
+      ))
+    params:
+      service:
+        type: string
+        required: true
+        max_length: 96
+        description: >-
+          The `destination_workload` value, exactly as api_error_rates returned it.
+      window:
+        type: enum
+        required: false
+        default: 15m
+        values: [5m, 15m, 30m, 1h, 6h, 24h]
+        description: Rate window.
+      top:
+        type: int
+        required: false
+        default: 10
+        min: 1
+        max: 30
+        description: How many callers to return.
+    timeout_s: 25
+
+  # -- counts, not rates ----------------------------------------------------
+  #
+  # Added after a live question — "which APIs give 5xx in the last 30 min where
+  # the total is more than 50 requests" — could not be answered by anything
+  # here. Every entry above returns a RATE, so the model fell back to composing
+  # a curl against an invented `http://prometheus:9090` and failed on DNS. A
+  # question about HOW MANY needs a function that returns how many.
+  - name: api_error_counts
+    surface: metrics
+    kind: promql
+    description: >-
+      HOW MANY 5xx responses each service returned over a window, as a COUNT,
+      optionally filtered to services above a threshold. Use whenever the
+      question is about a number of requests rather than a rate — "more than 50
+      errors", "how many 500s", "which services had errors at all".
+
+      Counts come from `increase()` over the window, so they are estimates from
+      a counter and can be fractional. Round when reporting; do not present
+      147.3 as if it were an exact tally.
+
+      For "is this bad?", follow with api_error_ratio — 60 errors matters very
+      differently at 200 requests than at 200,000.
+    target: metrics
+    promql: >-
+      sum by (destination_workload) (
+        increase(istio_requests_total{response_code=~"5.."}[$window])
+      ) > $min_count
+    params:
+      window:
+        type: enum
+        required: false
+        default: 30m
+        values: [5m, 15m, 30m, 1h, 6h, 24h]
+        description: How far back to count.
+      min_count:
+        type: int
+        required: false
+        default: 0
+        min: 0
+        max: 1000000
+        description: >-
+          Only return services with MORE than this many errors. 0 returns
+          everything with at least some. Use it to answer thresholds directly
+          rather than filtering by eye.
+    timeout_s: 25
+
+  - name: api_request_counts
+    surface: metrics
+    kind: promql
+    description: >-
+      Total requests each service handled over a window, as a COUNT — all
+      response codes, not just errors. This is the DENOMINATOR: use it beside
+      api_error_counts to say what share of traffic failed, and to spot a
+      service whose error count is low only because it is barely being called.
+    target: metrics
+    promql: >-
+      topk($top, sum by (destination_workload) (
+        increase(istio_requests_total[$window])
+      ))
+    params:
+      window:
+        type: enum
+        required: false
+        default: 30m
+        values: [5m, 15m, 30m, 1h, 6h, 24h]
+        description: How far back to count.
+      top:
+        type: int
+        required: false
+        default: 20
+        min: 1
+        max: 50
+        description: How many services to return, busiest first.
+    timeout_s: 25

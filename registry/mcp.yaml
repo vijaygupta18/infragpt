@@ -1,0 +1,402 @@
+# infragpt registry — MCP surface (in-cluster MCP servers, READ-ONLY)
+#
+# WHAT THIS FILE IS
+# -----------------
+# The team runs MCP servers for VictoriaMetrics, Grafana and OpenSearch in BOTH
+# clouds. This file is the ALLOWLIST: an MCP tool is callable if and only if an
+# entry here names it in `mcp_tool`. The executor refuses everything else, even
+# tools the server actively advertises. A server upgrade that ships `delete_index`
+# therefore cannot widen what infragpt can do — that containment property is
+# the whole reason MCP is reachable from here at all.
+#
+# On top of that the executor keeps a hard denylist of mutating verbs
+# (write|create|update|delete|drop|put|post|patch|set|remove|index|ingest|
+# restart|scale|apply|silence|ack) and refuses those regardless of what this
+# file says. If a real tool name trips the denylist, the entry must be dropped —
+# do NOT relax the denylist.
+#
+# Params are declared and validated HERE, by us, before anything is sent. The
+# LLM never hands raw JSON to a server. Note that STRING params reject shell
+# metacharacters, so a query containing | > $ ` \ is rejected rather than
+# escaped — write queries without them.
+#
+# TOOL NAMES NEED IN-CLUSTER VERIFICATION
+# ---------------------------------------
+# The servers are only reachable from inside the cluster, so the `mcp_tool`
+# values below are best guesses from each server's documented tool set. Before
+# trusting any of them, run the diagnostic `McpExecutor.list_tools(target)`
+# in-cluster and reconcile. Every unverified name is marked `# VERIFY`.
+
+entries:
+
+  # ---- Logs (OpenSearch MCP) ------------------------------------------------
+
+  # VERIFIED 2026-08-19 against the live server: the tools are `search`,
+  # `list_indices`, `get_mapping`, `cluster_health`, and `search` takes
+  # {index, query, size} where `query` is an Elasticsearch Query DSL OBJECT.
+  #
+  # The previous entries here sent flat params (service/query-string/window) to
+  # a guessed tool name and could never have worked. They are rebuilt on
+  # `mcp_arguments` templates: the model fills typed slots, the template builds
+  # the DSL. The model never authors the query body.
+
+  - name: logs_search
+    surface: logs
+    kind: mcp
+    description: >-
+      Full-text search over application logs for a time window, newest first.
+      Use to find the actual error text behind a spike.
+
+      The `query` slot is Lucene query-string syntax, so it can carry field
+      terms: `status:500`, `level:ERROR AND service:rider-app`,
+      `"NullPointerException"`. Combine terms rather than running several
+      searches.
+
+      NOT FOR 5xx TRIAGE. For "which APIs are erroring and why", use
+      api_error_rates then error_request_ids then logs_for_request_id: a broad
+      search here returns hundreds of access-log lines, fills the evidence
+      budget, and leaves no room for the application logs that contain the
+      actual error.
+
+      INTERPRETATION TRAP: results are capped by `size` and are a SAMPLE, not a
+      count — never infer "only N errors happened" from the number of hits.
+      Logs are per-cloud and NOT replicated, so a clean result for one cloud
+      says nothing about the other; state which cloud the answer came from.
+    target: opensearch_$cloud
+    mcp_tool: search
+    mcp_tool_aliases: [logs_search, search_logs, opensearch_search]
+    mcp_arguments:
+      index: $index
+      size: $size
+      # Objects, not "field:direction" strings — the server rejects the string
+      # form. Newest first, so these always answer with the LATEST logs.
+      sort:
+        - "@timestamp":
+            order: desc
+      query:
+        bool:
+          filter:
+            - range:
+                "@timestamp":
+                  gte: $window
+            - query_string:
+                query: $query
+                analyze_wildcard: true
+    params:
+      cloud:
+        type: enum
+        required: false
+        default: gcp
+        values: [gcp, aws]
+        description: >-
+          Which cloud. DEFAULTS TO GCP and you should almost always leave it
+          there: this platform is migrating to GCP, and AWS is only worth
+          querying when the question NAMES it. Do not check both "to be safe" —
+          that doubles the cost of every question and, for surfaces AWS cannot
+          reach, produces a failure that reads like a fact about production.
+      index:
+        type: enum
+        required: false
+        default: "app-logs-*"
+        values: ["app-logs-*", "istio-*"]
+        description: >-
+          VERIFIED 2026-08-19. app-logs-* is the application logs; istio-* is
+          the mesh access log, where response codes and request ids live. Both
+          are DAILY indices and the wildcard covers today, so this always
+          reaches the latest data — results are returned newest-first.
+
+          APPLICATION LOGS ARE UNSTRUCTURED: a document has only @timestamp,
+          cluster and log_message. Pod name, level, API path and error text are
+          all inside the log_message STRING, so field terms like `level:ERROR`
+          match NOTHING there. Search app logs with free text; field terms work
+          only against istio-*.
+      query:
+        type: string
+        required: true
+        max_length: 200
+        description: >-
+          Lucene query-string syntax, e.g. `level:ERROR`, `status:5*`,
+          `"connection refused"`.
+      window:
+        type: enum
+        required: false
+        default: now-15m
+        values: [now-5m, now-15m, now-30m, now-1h, now-3h, now-6h, now-24h]
+        description: Lookback, as date math ending now.
+      size:
+        type: int
+        required: false
+        default: 25
+        min: 1
+        max: 100
+        description: Maximum hits. The server caps this at 100.
+    row_limit: 100
+    timeout_s: 30
+
+  - name: list_log_indices
+    surface: logs
+    kind: mcp
+    description: >-
+      List the log indices that actually exist, with an optional pattern. Run
+      this FIRST whenever a log search returns nothing: an index that does not
+      exist and an index with no matching documents both return zero hits, and
+      only this call tells the two apart.
+    target: opensearch_$cloud
+    mcp_tool: list_indices
+    mcp_tool_aliases: [log_indices, indices, cat_indices]
+    mcp_arguments:
+      pattern: $pattern
+    params:
+      cloud:
+        type: enum
+        required: false
+        default: gcp
+        values: [gcp, aws]
+        description: >-
+          Which cloud. DEFAULTS TO GCP and you should almost always leave it
+          there: this platform is migrating to GCP, and AWS is only worth
+          querying when the question NAMES it. Do not check both "to be safe" —
+          that doubles the cost of every question and, for surfaces AWS cannot
+          reach, produces a failure that reads like a fact about production.
+      pattern:
+        type: string
+        required: false
+        max_length: 64
+        description: Optional glob, e.g. `logstash-*`. Omit to list everything.
+    row_limit: 100
+    timeout_s: 25
+
+  - name: log_field_mapping
+    surface: logs
+    kind: mcp
+    description: >-
+      The field names and types of a log index. Use when a query-string term
+      matches nothing and you need to know what the fields are actually called
+      — the request-id field in particular is `request_id` on some indices and
+      `x_request_id` on others, and guessing wrong returns silence.
+    target: opensearch_$cloud
+    mcp_tool: get_mapping
+    mcp_tool_aliases: [get_field_mapping, mapping, indices_get_mapping]
+    mcp_arguments:
+      index: $index
+    params:
+      cloud:
+        type: enum
+        required: false
+        default: gcp
+        values: [gcp, aws]
+        description: >-
+          Which cloud. DEFAULTS TO GCP and you should almost always leave it
+          there: this platform is migrating to GCP, and AWS is only worth
+          querying when the question NAMES it. Do not check both "to be safe" —
+          that doubles the cost of every question and, for surfaces AWS cannot
+          reach, produces a failure that reads like a fact about production.
+      index:
+        type: string
+        required: true
+        max_length: 64
+        description: Index or pattern, e.g. `istio-*`.
+    row_limit: 200
+    timeout_s: 25
+
+  # ---- Request-id correlation (steps 3 and 4 of registry/triage.yaml) ------
+  - name: error_request_ids
+    surface: logs
+    kind: mcp
+    description: >-
+      STEP 3 of API error triage. Get the REQUEST IDS of failing requests from
+      the Istio access log, so one failure can be followed end to end. Run after
+      api_error_codes has told you which service and which code to chase.
+
+      Each hit should carry a request id (`request_id` or `x_request_id`), the
+      path, and the response code. Take two or three ids and follow each with
+      logs_for_request_id — failures in one bucket are usually the same failure,
+      and reading one properly beats skimming fifty.
+
+      YOU ARE NOT FINISHED AFTER THIS CALL. The mesh access log records that a
+      request failed; it NEVER contains the error text. Take one id from these
+      results and call logs_for_request_id — that is where the exception is.
+      Observed live: stopping here answers "which APIs are failing" and leaves
+      "what are the errors" unanswered, which is half the question.
+
+      Keep `size` small (the default 20 is plenty). These hits are verbose, and
+      a large dump crowds out the application logs that hold the actual answer.
+
+      NOT A COUNT: hits are capped by `size`. Only api_error_rates answers "how
+      many".
+
+      IF EMPTY: check list_log_indices first — the mesh access log may be under
+      a different index here — then widen the window. Empty is not "no errors".
+    target: opensearch_$cloud
+    mcp_tool: search
+    mcp_tool_aliases: [logs_search, search_logs, opensearch_search]
+    mcp_arguments:
+      index: $index
+      size: $size
+      # Objects, not "field:direction" strings — the server rejects the string
+      # form. Newest first, so these always answer with the LATEST logs.
+      sort:
+        - "@timestamp":
+            order: desc
+      query:
+        bool:
+          filter:
+            - range:
+                "@timestamp":
+                  gte: $window
+            - query_string:
+                query: $query
+                analyze_wildcard: true
+    params:
+      cloud:
+        type: enum
+        required: false
+        default: gcp
+        values: [gcp, aws]
+        description: >-
+          Which cloud. DEFAULTS TO GCP and you should almost always leave it
+          there: this platform is migrating to GCP, and AWS is only worth
+          querying when the question NAMES it. Do not check both "to be safe" —
+          that doubles the cost of every question and, for surfaces AWS cannot
+          reach, produces a failure that reads like a fact about production.
+      index:
+        type: enum
+        required: false
+        default: "istio-*"
+        values: ["istio-*", "app-logs-*"]
+        description: >-
+          istio-* is the mesh access log and the only place with structured
+          response codes and request ids. Daily indices, so the wildcard always
+          includes today and results come back newest-first.
+      query:
+        type: string
+        required: false
+        default: "response_code:[500 TO 599]"
+        max_length: 200
+        description: >-
+          What counts as failing, in Lucene syntax against istio-* fields.
+          `response_code` is NUMERIC, so ranges work: `response_code:504`,
+          `response_code:[500 TO 599]`.
+
+          Scope it with the fields that actually exist on this index (VERIFIED):
+          `upstream_cluster` (carries the destination service),
+          `path`, `method`, `authority`, `source`, `cluster_name`. There is no
+          `destination_workload` field in the LOGS — that label exists only in
+          the metrics. Example:
+          `response_code:[500 TO 599] AND upstream_cluster:*driver-offer-bpp*`.
+      window:
+        type: enum
+        required: false
+        default: now-15m
+        values: [now-5m, now-15m, now-30m, now-1h, now-3h, now-6h]
+        description: >-
+          Match the window that showed the errors in metrics. A 6h search
+          against a 5-minute spike buries it.
+      size:
+        type: int
+        required: false
+        default: 20
+        min: 1
+        max: 100
+        description: Enough to pull a few ids from. 20 is plenty.
+    row_limit: 100
+    timeout_s: 30
+
+  - name: logs_for_request_id
+    surface: logs
+    kind: mcp
+    description: >-
+      STEP 4, and the point of the whole chain. Every log line carrying ONE
+      request id, across all services that handled it — the edge proxy, the
+      service that returned the 5xx, and whatever it called that actually
+      failed.
+
+      This is what turns "the API is throwing 500s" into "it is throwing 500s
+      because this call to that dependency timed out".
+
+      READ IN TIMESTAMP ORDER AND FIND THE FIRST FAILURE. Everything after it is
+      usually a consequence; answering with the last error describes a symptom
+      as if it were a cause.
+
+      Searches `logstash-*` by default because the value here is seeing the
+      request in the APPLICATION logs of services other than the one that
+      reported the error.
+
+      IF EMPTY: the id is real — it came from a log line — so an empty result
+      means the wrong cloud, a window that does not cover the request, or a
+      service that does not propagate the header. Say which you checked rather
+      than concluding the request did not happen.
+    target: opensearch_$cloud
+    mcp_tool: search
+    mcp_tool_aliases: [logs_search, search_logs, opensearch_search]
+    mcp_arguments:
+      index: $index
+      size: $size
+      # Ascending here on purpose: a single request is read as a trace, and the
+      # FIRST failure is the cause. The window keeps it to recent data.
+      sort:
+        - "@timestamp":
+            order: asc
+      query:
+        bool:
+          filter:
+            - range:
+                "@timestamp":
+                  gte: $window
+            - query_string:
+                query: $request_id
+                analyze_wildcard: false
+    params:
+      cloud:
+        type: enum
+        required: false
+        default: gcp
+        values: [gcp, aws]
+        description: >-
+          Which cloud. DEFAULTS TO GCP and you should almost always leave it
+          there: this platform is migrating to GCP, and AWS is only worth
+          querying when the question NAMES it. Do not check both "to be safe" —
+          that doubles the cost of every question and, for surfaces AWS cannot
+          reach, produces a failure that reads like a fact about production.
+      request_id:
+        type: string
+        required: true
+        max_length: 120
+        description: >-
+          The request id from istio-*, QUOTED — e.g.
+          `"9f2c1b7a-5e44-4c0e-9a11-77c2b0d3e8f1"`. Quoting matters: unquoted,
+          the dashes parse as query syntax and match the wrong things.
+
+          Pass the BARE uuid, not a prefixed form. The mesh log stores it in a
+          `request_id` field; the application log embeds it in the message text
+          as `requestId-<uuid>`. A quoted bare uuid matches both, which is what
+          makes the two searchable together. A truncated id matches nothing.
+      index:
+        type: enum
+        required: false
+        default: "app-logs-*"
+        values: ["app-logs-*", "istio-*", "*"]
+        description: >-
+          app-logs-* is the application logs, where the actual error text is.
+          `*` searches everything including the mesh access log — use it for the
+          full picture of one request.
+      window:
+        type: enum
+        required: false
+        default: now-1h
+        values: [now-15m, now-30m, now-1h, now-3h, now-6h, now-24h]
+        description: >-
+          Must cover when the request happened. Wider by default than the other
+          log entries, because a request found at the edge of a 15m window has
+          upstream lines just outside it.
+      size:
+        type: int
+        required: false
+        default: 100
+        min: 1
+        max: 100
+        description: >-
+          A single request rarely exceeds a few dozen lines, so this is
+          deliberately generous — truncating the trace defeats the purpose.
+    row_limit: 200
+    timeout_s: 30

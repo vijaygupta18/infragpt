@@ -1,0 +1,94 @@
+# Free-form read-only SQL against the AlloyDB READER endpoints.
+#
+# WHY, when registry/db.yaml deliberately fixes every statement:
+#
+# Observed live. Asked which indexes were INVALID, the model had no registered
+# function for `pg_index.indisvalid`, fell back to composing a psql command, and
+# could not know the host, user or database — so it connected to a local socket
+# and failed twice. The registry cannot anticipate every catalogue question, and
+# an assistant that answers "I have no function for that" to a question the
+# database can answer in one line is not much of an assistant.
+#
+# WHY THIS IS SAFE HERE:
+#   * The connection is a NAMED reader — the model supplies SQL, never a host,
+#     user or password. Writer endpoints are not in config at all.
+#   * The endpoints are physical read replicas: `pg_is_in_recovery() = t`, so a
+#     write is impossible, not merely denied.
+#   * The role is SELECT-only, so a write fails again at the credential layer.
+#   * Only pg_catalog and information_schema relations are reachable, so this
+#     cannot become an unaudited path to business rows (assert_catalogue_only).
+#   * connect_timeout, statement_timeout and idle_in_transaction_session_timeout
+#     are set in the CONNECTION options, so they bound every statement without
+#     the executor having to remember; a forced LIMIT bounds rows;
+#     the pool is capped at 5 connections so this cannot exhaust a reader.
+#   * app/registry/readonly.py rejects anything that is not a single read at
+#     load, and the executor re-checks the statement before it runs.
+#
+# So four independent things must fail before a write could happen, and one of
+# them is physics rather than code.
+
+entries:
+  - name: db_query
+    surface: db:read
+    kind: sqlfree
+    tags: [heavy]
+    description: >-
+      Run a single read-only SELECT against a database READER and return the
+      rows. Use this when no fixed function covers the question — invalid or
+      unusable indexes (`pg_index.indisvalid = false`), constraint definitions,
+      partition layouts, extension state, planner settings, anything in
+      pg_catalog or information_schema.
+
+      PREFER A FIXED FUNCTION when one exists: table_info, table_indexes,
+      unused_indexes, seq_scan_heavy_tables, active_connections,
+      long_running_queries, locks, replication_lag and the rest are narrower,
+      already bounded and already carry the interpretation caveats.
+
+      RULES: one statement only, beginning with SELECT or WITH. No INSERT,
+      UPDATE, DELETE, DDL or multiple statements — they are refused, and the
+      refusal comes back with the reason so you can correct it. Always include
+      your own LIMIT. You do not supply a host, user or password; the connection
+      is chosen by the `db` parameter.
+
+      SCOPE: pg_catalog and information_schema ONLY, and this is enforced, not
+      requested — a statement that reads an application table is refused with
+      that reason. Business-row questions about a specific driver, rider, ride
+      or payment cannot be answered here at all; say so, and point at the
+      per-subject lookups, which are separately granted and audited.
+
+      CAVEAT to state in any answer: these are replicas, so `pg_stat_*` counters
+      are PER NODE and describe this replica only, not the cluster.
+    target: $db
+    params:
+      sql:
+        # statement, not string: SQL needs `;`, `'` and `$`, which the generic
+        # shell-metachar screen rejects. The read-only SQL guard is the real
+        # check and understands the language.
+        type: statement
+        required: true
+        max_length: 4000
+        description: >-
+          A single SELECT. Example, for indexes that exist but are not valid:
+          SELECT c.relname AS index_name, t.relname AS table_name,
+          i.indisvalid, i.indisready
+          FROM pg_index i
+          JOIN pg_class c ON c.oid = i.indexrelid
+          JOIN pg_class t ON t.oid = i.indrelid
+          WHERE NOT i.indisvalid OR NOT i.indisready
+          LIMIT 200
+      db:
+        type: enum
+        required: true
+        values: [driver_noncrit, driver_ro, rider_ro]
+        description: >-
+          Which reader to query. PREFER driver_noncrit for anything on the
+          driver side: it is the non-critical read pool, and the critical
+          reader sits in the path of drivers going online — a scan-heavy
+          catalogue query does not belong there. Use driver_ro only when the
+          question is specifically about the critical reader's own state
+          (its connections, its replication lag, its cache hit ratio).
+          rider_ro is the rider/BAP side. The same table name exists on both
+          and they are different databases — never assume one answers for the
+          other.
+    row_limit: 500
+    timeout_s: 25

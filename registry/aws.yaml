@@ -1,0 +1,300 @@
+# infragpt registry — AWS control plane (CloudWatch + ElastiCache), read-only.
+#
+# WHY: Redis in AWS is VPC-internal, so the `redis` surface only works from inside
+# the VPC. CloudWatch and the ElastiCache Describe APIs are public endpoints with
+# IAM auth, so they answer capacity and health questions from anywhere — including
+# during an incident when the VPC path is itself the problem.
+#
+# Signed with SigV4 in-process (stdlib hmac/hashlib) rather than via boto3 or the
+# aws CLI: no large dependency, no second subprocess surface. Only Describe* and
+# GetMetricStatistics are reachable from the executor.
+#
+# NOTE ON CLOUD SEPARATION: these are the AWS-side caches. GCP Redis is a
+# different, never-replicated keyspace — never present an AWS figure as if it
+# described GCP, or vice versa.
+
+entries:
+  - name: elasticache_instances
+    surface: cloud:aws
+    kind: awselasticache
+    description: >-
+      Inventory of AWS ElastiCache clusters: id, engine and version, node type,
+      node count and status. Call this first to learn valid cluster ids before
+      asking for any per-cluster metric.
+    target: aws_elasticache
+    params: {}
+    row_limit: 50
+    timeout_s: 25
+
+  - name: elasticache_connections
+    surface: cloud:aws
+    kind: awsmetric
+    namespace: AWS/ElastiCache
+    metric: CurrConnections
+    description: >-
+      Current client connections to an ElastiCache (Valkey/Redis) node, average
+      and maximum per period. Works without a VPC route. Requires a cluster id —
+      get one from elasticache_instances rather than guessing.
+    target: aws_cloudwatch
+    params:
+      cluster:
+        type: string
+        required: true
+        max_length: 128
+        description: CacheClusterId, e.g. cache-cluster-001-0001-001.
+      window:
+        type: duration
+        required: false
+        default: 30m
+        description: Look-back window, e.g. 30m, 6h. Defaults to 30m.
+    row_limit: 40
+    timeout_s: 25
+
+  - name: elasticache_cpu
+    surface: cloud:aws
+    kind: awsmetric
+    namespace: AWS/ElastiCache
+    metric: EngineCPUUtilization
+    description: >-
+      Redis/Valkey engine CPU percentage for a cache node. Prefer this over host
+      CPUUtilization: the engine is effectively single-threaded, so host CPU can
+      look low while the engine itself is saturated.
+    target: aws_cloudwatch
+    params:
+      cluster:
+        type: string
+        required: true
+        max_length: 128
+        description: CacheClusterId.
+      window:
+        type: duration
+        required: false
+        default: 30m
+        description: Look-back window. Defaults to 30m.
+    row_limit: 40
+    timeout_s: 25
+
+  - name: elasticache_memory
+    surface: cloud:aws
+    kind: awsmetric
+    namespace: AWS/ElastiCache
+    metric: DatabaseMemoryUsagePercentage
+    description: >-
+      Percentage of the node's maxmemory in use. Read together with
+      elasticache_evictions — high memory alone is normal for a cache, but high
+      memory WITH evictions means the working set no longer fits.
+    target: aws_cloudwatch
+    params:
+      cluster:
+        type: string
+        required: true
+        max_length: 128
+        description: CacheClusterId.
+      window:
+        type: duration
+        required: false
+        default: 30m
+        description: Look-back window. Defaults to 30m.
+    row_limit: 40
+    timeout_s: 25
+
+  - name: elasticache_evictions
+    surface: cloud:aws
+    kind: awsmetric
+    namespace: AWS/ElastiCache
+    metric: Evictions
+    description: >-
+      Keys evicted for lack of memory. Any sustained non-zero value means the
+      cache is dropping data it was asked to keep, which surfaces to users as
+      unexplained cache misses and recomputation.
+    target: aws_cloudwatch
+    params:
+      cluster:
+        type: string
+        required: true
+        max_length: 128
+        description: CacheClusterId.
+      window:
+        type: duration
+        required: false
+        default: 30m
+        description: Look-back window. Defaults to 30m.
+    row_limit: 40
+    timeout_s: 25
+
+  - name: elasticache_replication_lag
+    surface: cloud:aws
+    kind: awsmetric
+    namespace: AWS/ElastiCache
+    metric: ReplicationLag
+    description: >-
+      Seconds a replica node is behind its primary. Only meaningful on replica
+      nodes; a primary reports zero or no data, which is not the same as healthy.
+    target: aws_cloudwatch
+    params:
+      cluster:
+        type: string
+        required: true
+        max_length: 128
+        description: CacheClusterId of the REPLICA node.
+      window:
+        type: duration
+        required: false
+        default: 30m
+        description: Look-back window. Defaults to 30m.
+    row_limit: 40
+    timeout_s: 25
+
+  # ---------------------------------------------------------------------------
+  # Additional ElastiCache CloudWatch metrics.
+  #
+  # NOTE: an `elasticache_replication_groups` inventory (DescribeReplicationGroups,
+  # for primary/replica topology and failover state) is NOT here — the
+  # `awselasticache` executor only issues DescribeCacheClusters, so it needs an
+  # executor change before that entry can exist. Adding the YAML alone would ship
+  # a guaranteed runtime failure.
+  # ---------------------------------------------------------------------------
+
+  - name: elasticache_network_bytes_in
+    surface: cloud:aws
+    kind: awsmetric
+    namespace: AWS/ElastiCache
+    metric: NetworkBytesIn
+    description: >-
+      Bytes read from the network by a cache node over each period. Use when a
+      cache is slow but CPU and memory look fine — a node can saturate its
+      network allowance while every other metric stays flat.
+      INTERPRETATION TRAP: this is a SUM per period, in bytes, not a rate. Divide
+      by the period length before comparing it to any bandwidth figure, and state
+      the period. Compare against elasticache_network_bytes_out: inbound far
+      exceeding outbound means large writes, the reverse means large values being
+      read (usually one oversized key — confirm with redis_memory_usage).
+    target: aws_cloudwatch
+    params:
+      cluster:
+        type: string
+        required: true
+        max_length: 128
+        description: CacheClusterId, from elasticache_instances.
+      window:
+        type: duration
+        required: false
+        default: 30m
+        description: Look-back window. Defaults to 30m.
+    row_limit: 40
+    timeout_s: 25
+
+  - name: elasticache_network_bytes_out
+    surface: cloud:aws
+    kind: awsmetric
+    namespace: AWS/ElastiCache
+    metric: NetworkBytesOut
+    description: >-
+      Bytes sent to the network by a cache node over each period. Outbound is
+      usually the side that saturates first on a read-heavy cache.
+      INTERPRETATION TRAP: this is a SUM per period, in bytes, not a rate —
+      divide by the period and say so. On a node with replicas, replication
+      traffic is included here, so a primary will always show more outbound than
+      its client read volume alone would explain.
+    target: aws_cloudwatch
+    params:
+      cluster:
+        type: string
+        required: true
+        max_length: 128
+        description: CacheClusterId, from elasticache_instances.
+      window:
+        type: duration
+        required: false
+        default: 30m
+        description: Look-back window. Defaults to 30m.
+    row_limit: 40
+    timeout_s: 25
+
+  - name: elasticache_cache_hits
+    surface: cloud:aws
+    kind: awsmetric
+    namespace: AWS/ElastiCache
+    metric: CacheHits
+    description: >-
+      Number of successful read-only key lookups on a cache node per period.
+      INTERPRETATION TRAP: a hit count is meaningless alone. The hit RATIO is
+      hits / (hits + misses), so this must be read together with
+      elasticache_cache_misses over the SAME window — quoting hits by itself
+      invites "hits are high, the cache is fine" when misses are higher still.
+      Only key-based read commands are counted, so a workload dominated by writes
+      or by non-key commands will show low numbers without anything being wrong.
+    target: aws_cloudwatch
+    params:
+      cluster:
+        type: string
+        required: true
+        max_length: 128
+        description: CacheClusterId, from elasticache_instances.
+      window:
+        type: duration
+        required: false
+        default: 30m
+        description: Look-back window. Defaults to 30m.
+    row_limit: 40
+    timeout_s: 25
+
+  - name: elasticache_cache_misses
+    surface: cloud:aws
+    kind: awsmetric
+    namespace: AWS/ElastiCache
+    metric: CacheMisses
+    description: >-
+      Number of unsuccessful read-only key lookups on a cache node per period.
+      INTERPRETATION TRAP 1: misses are NOT a fault by themselves. A cache with
+      short TTLs, a cold start, or a deliberately sparse keyspace misses
+      constantly and is working as designed. What matters is the ratio against
+      elasticache_cache_hits over the same window, and the CHANGE in that ratio.
+      INTERPRETATION TRAP 2: a miss is not an eviction. Rising misses WITH
+      non-zero elasticache_evictions means the working set no longer fits; rising
+      misses with zero evictions means keys expired or were never written — a
+      different problem with a different fix.
+    target: aws_cloudwatch
+    params:
+      cluster:
+        type: string
+        required: true
+        max_length: 128
+        description: CacheClusterId, from elasticache_instances.
+      window:
+        type: duration
+        required: false
+        default: 30m
+        description: Look-back window. Defaults to 30m.
+    row_limit: 40
+    timeout_s: 25
+
+  - name: elasticache_swap_usage
+    surface: cloud:aws
+    kind: awsmetric
+    namespace: AWS/ElastiCache
+    metric: SwapUsage
+    description: >-
+      Bytes of swap used by the host running a cache node. This should be
+      essentially zero at all times.
+      INTERPRETATION TRAP: any sustained non-zero value is serious, not marginal.
+      A Redis/Valkey node that swaps pays disk latency on operations that are
+      supposed to be microseconds, so a small swap figure can produce a large,
+      erratic latency tail — do not dismiss tens of MB as "low". Read alongside
+      elasticache_memory: swap rising while memory-usage percentage looks
+      acceptable usually means reserved-memory headroom is too small for the
+      fork/copy-on-write of a background save.
+    target: aws_cloudwatch
+    params:
+      cluster:
+        type: string
+        required: true
+        max_length: 128
+        description: CacheClusterId, from elasticache_instances.
+      window:
+        type: duration
+        required: false
+        default: 30m
+        description: Look-back window. Defaults to 30m.
+    row_limit: 40
+    timeout_s: 25

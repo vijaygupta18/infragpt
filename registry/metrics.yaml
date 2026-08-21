@@ -1,0 +1,213 @@
+# infragpt registry — metrics surface (VictoriaMetrics, READ-ONLY)
+#
+# These are NAMED PROMQL TEMPLATES, not a PromQL passthrough. The LLM picks a
+# template and fills typed slots; it cannot write an expression. That removes
+# the whole class of "close the label matcher and append your own selector"
+# injection, and it also stops the assistant firing a cardinality bomb at the
+# metrics store.
+#
+# Slot values are substituted ONLY after ParamSpec validation, and the executor
+# independently re-checks every substituted value against a strict PromQL
+# label-value pattern before the expression is built. A value that would need
+# quoting is rejected, not escaped.
+#
+# `target: metrics` is the single named metrics connection (config.METRICS_URL).
+
+entries:
+  - name: service_error_rate
+    surface: metrics
+    kind: promql
+    description: >-
+      Fraction of HTTP responses from a service that are 5xx, over a window.
+      Use to confirm whether a service is actually erroring before digging into
+      pod logs.
+    target: metrics
+    promql: >-
+      sum(rate(http_requests_total{service="$service",cloud="$cloud",status=~"5.."}[$window]))
+      /
+      clamp_min(sum(rate(http_requests_total{service="$service",cloud="$cloud"}[$window])), 1e-9)
+    params:
+      service:
+        type: string
+        required: true
+        max_length: 64
+        description: Service label value, e.g. driver-offer-bpp or rider-app.
+      cloud:
+        type: enum
+        required: false
+        default: gcp
+        values: [gcp, aws]
+        description: >-
+          Which cloud. DEFAULTS TO GCP and you should almost always leave it
+          there: this platform is migrating to GCP, and AWS is only worth
+          querying when the question NAMES it. Do not check both "to be safe" —
+          that doubles the cost of every question and, for surfaces AWS cannot
+          reach, produces a failure that reads like a fact about production.
+      window:
+        type: enum
+        required: false
+        default: 5m
+        values: [1m, 5m, 15m, 1h, 6h, 24h]
+        description: Rate window. Defaults to 5m.
+    timeout_s: 20
+
+  - name: service_latency_p99
+    surface: metrics
+    kind: promql
+    description: >-
+      p99 request latency in seconds for a service, from its duration
+      histogram, over a window.
+    target: metrics
+    promql: >-
+      histogram_quantile(0.99, sum by (le) (rate(
+        http_request_duration_seconds_bucket{service="$service",cloud="$cloud"}[$window]
+      )))
+    params:
+      service:
+        type: string
+        required: true
+        max_length: 64
+        description: Service label value, e.g. driver-offer-bpp.
+      cloud:
+        type: enum
+        required: false
+        default: gcp
+        values: [gcp, aws]
+        description: >-
+          Which cloud. DEFAULTS TO GCP and you should almost always leave it
+          there: this platform is migrating to GCP, and AWS is only worth
+          querying when the question NAMES it. Do not check both "to be safe" —
+          that doubles the cost of every question and, for surfaces AWS cannot
+          reach, produces a failure that reads like a fact about production.
+      window:
+        type: enum
+        required: false
+        default: 5m
+        values: [1m, 5m, 15m, 1h, 6h, 24h]
+        description: Histogram rate window. Defaults to 5m.
+    timeout_s: 20
+
+  - name: pod_restarts
+    surface: metrics
+    kind: promql
+    description: >-
+      Container restarts per pod in a namespace over a window. Non-zero here is
+      the metrics-side signal of a CrashLoopBackOff.
+    target: metrics
+    promql: >-
+      sum by (pod, container) (increase(
+        kube_pod_container_status_restarts_total{namespace="$namespace",cloud="$cloud"}[$window]
+      )) > 0
+    params:
+      namespace:
+        type: enum
+        required: false
+        default: apps
+        values: [apps]
+        description: Kubernetes namespace. Defaults to apps.
+      cloud:
+        type: enum
+        required: false
+        default: gcp
+        values: [gcp, aws]
+        description: >-
+          Which cloud. DEFAULTS TO GCP and you should almost always leave it
+          there: this platform is migrating to GCP, and AWS is only worth
+          querying when the question NAMES it. Do not check both "to be safe" —
+          that doubles the cost of every question and, for surfaces AWS cannot
+          reach, produces a failure that reads like a fact about production.
+      window:
+        type: enum
+        required: false
+        default: 1h
+        values: [15m, 1h, 6h, 24h]
+        description: Lookback window. Defaults to 1h.
+    timeout_s: 20
+
+  - name: cpu_saturation
+    surface: metrics
+    kind: promql
+    description: >-
+      CPU cores used per pod as a fraction of its CPU limit, in a namespace.
+      Values near or above 1 mean the pod is being throttled.
+    target: metrics
+    promql: >-
+      sum by (pod) (rate(container_cpu_usage_seconds_total{namespace="$namespace",cloud="$cloud",container!=""}[$window]))
+      /
+      clamp_min(sum by (pod) (kube_pod_container_resource_limits{namespace="$namespace",cloud="$cloud",resource="cpu"}), 1e-9)
+    params:
+      namespace:
+        type: enum
+        required: false
+        default: apps
+        values: [apps]
+        description: Kubernetes namespace. Defaults to apps.
+      cloud:
+        type: enum
+        required: false
+        default: gcp
+        values: [gcp, aws]
+        description: >-
+          Which cloud. DEFAULTS TO GCP and you should almost always leave it
+          there: this platform is migrating to GCP, and AWS is only worth
+          querying when the question NAMES it. Do not check both "to be safe" —
+          that doubles the cost of every question and, for surfaces AWS cannot
+          reach, produces a failure that reads like a fact about production.
+      window:
+        type: enum
+        required: false
+        default: 5m
+        values: [1m, 5m, 15m, 1h]
+        description: Rate window. Defaults to 5m.
+    timeout_s: 20
+
+  - name: memory_saturation
+    surface: metrics
+    kind: promql
+    description: >-
+      Working-set memory per pod as a fraction of its memory limit, in a
+      namespace. Values approaching 1 precede an OOMKill.
+    target: metrics
+    promql: >-
+      sum by (pod) (container_memory_working_set_bytes{namespace="$namespace",cloud="$cloud",container!=""})
+      /
+      clamp_min(sum by (pod) (kube_pod_container_resource_limits{namespace="$namespace",cloud="$cloud",resource="memory"}), 1e-9)
+    params:
+      namespace:
+        type: enum
+        required: false
+        default: apps
+        values: [apps]
+        description: Kubernetes namespace. Defaults to apps.
+      cloud:
+        type: enum
+        required: false
+        default: gcp
+        values: [gcp, aws]
+        description: >-
+          Which cloud. DEFAULTS TO GCP and you should almost always leave it
+          there: this platform is migrating to GCP, and AWS is only worth
+          querying when the question NAMES it. Do not check both "to be safe" —
+          that doubles the cost of every question and, for surfaces AWS cannot
+          reach, produces a failure that reads like a fact about production.
+    timeout_s: 20
+
+  - name: db_connection_count
+    surface: metrics
+    kind: promql
+    description: >-
+      Postgres/AlloyDB backend connection count per database and state, as
+      scraped by the exporter. Use alongside the active_connections DB function
+      to see the trend rather than the instant.
+    target: metrics
+    promql: >-
+      sum by (datname, state) (pg_stat_activity_count{instance=~"$instance.*"})
+    params:
+      instance:
+        type: string
+        required: true
+        max_length: 64
+        description: >-
+          Exporter instance label prefix identifying the AlloyDB instance, e.g.
+          alloydb-primary.
+    timeout_s: 20

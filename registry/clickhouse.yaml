@@ -1,0 +1,235 @@
+# infragpt registry — ClickHouse (READ-ONLY, the analytics warehouse)
+#
+# This is the only surface in the registry that returns BUSINESS data — rides,
+# bookings, events — rather than infrastructure metadata. That is why it sits on
+# its own surface (`analytics`) rather than on db:read, and why only the
+# `analyst` role holds it: needing to debug a slow reader is not a reason to be
+# able to read ride history. The split is the same one db:read / db:entity draws
+# on the Postgres side.
+#
+# A NOTE ON SURFACE CHOICE. Reusing db:read was considered and rejected. db:read
+# is documented, to the model and to approvers, as "the DATABASE, never the rows"
+# — assert_catalogue_only enforces exactly that. Putting a warehouse full of
+# business rows behind the same grant would silently widen every existing
+# db:read holder, which is precisely the failure the db:entity split was drawn to
+# prevent. The schema and cluster-health entries below could defensibly live on a
+# narrower grant, but splitting analytics again would give the analyst role a
+# second checkbox for no gain: they are all the same cluster, and none of them is
+# useful without the others.
+#
+# WHY THIS IS SAFE:
+#   * The connection is NAMED. The model supplies a statement, never a host,
+#     user, password or port.
+#   * The account is a ClickHouse user whose profile sets `readonly = 1`, so a
+#     write is refused by the server before any of our code is consulted.
+#   * The executor sends `readonly=1` as a SETTING on EVERY request, along with
+#     max_execution_time, max_result_rows and max_result_bytes. Those are built
+#     in app/executors/clickhouse.py and are not reachable from this file — an
+#     entry cannot widen or drop them.
+#   * app/registry/readonly.py refuses a mutating entry at LOAD time, so a bad
+#     PR here stops the deploy rather than surfacing at 3am.
+#   * app/executors/clickhouse.assert_read_only re-checks the statement just
+#     before it is sent, including the table functions (`url`, `s3`, `remote`,
+#     `file`) that are well-formed SELECTs but are not reads of this warehouse.
+#
+# Parameters are bound SERVER-SIDE using ClickHouse's own `{name:Type}` syntax
+# and travel as `param_*` arguments. Nothing in this file is interpolated.
+
+entries:
+  # --- schema introspection ------------------------------------------------
+
+  - name: ch_tables
+    surface: analytics
+    kind: clickhouse
+    description: >-
+      List tables in a ClickHouse database with their engine, row count and
+      on-disk size. Use this FIRST when you do not know what a table is called —
+      guessing a table name and getting "unknown table" burns a call for nothing.
+
+      Ordered by size, largest first. `total_rows` and `total_bytes` are the
+      engine's own accounting: for MergeTree they are accurate, for a View or a
+      Distributed table they are null, which means "not tracked", NOT "empty".
+    target: ch_prod
+    params:
+      database:
+        type: identifier
+        required: true
+        description: >-
+          ClickHouse database name. If you do not know it, `default` is the
+          usual starting point; ch_query against system.databases lists them.
+    sql: |
+      SELECT name,
+             engine,
+             total_rows,
+             formatReadableSize(total_bytes) AS size,
+             partition_key,
+             sorting_key
+      FROM system.tables
+      WHERE database = {database:String}
+      ORDER BY total_bytes DESC NULLS LAST
+    row_limit: 300
+    timeout_s: 15
+
+  - name: ch_columns
+    surface: analytics
+    kind: clickhouse
+    description: >-
+      Column names and types for one ClickHouse table, with compressed size per
+      column. Use before writing a ch_query against an unfamiliar table.
+
+      Note the types: ClickHouse `DateTime` has second resolution and is stored
+      in the column's own timezone, and `Nullable(...)` columns behave
+      differently in aggregations than their non-nullable equivalents. Both
+      change what a correct query looks like, so read the types rather than
+      assuming them.
+    target: ch_prod
+    params:
+      database:
+        type: identifier
+        required: true
+        description: ClickHouse database name.
+      table:
+        type: identifier
+        required: true
+        description: Table name, unqualified.
+    sql: |
+      SELECT name,
+             type,
+             default_kind,
+             formatReadableSize(data_compressed_bytes) AS compressed,
+             formatReadableSize(data_uncompressed_bytes) AS uncompressed
+      FROM system.columns
+      WHERE database = {database:String}
+        AND table = {table:String}
+      ORDER BY position
+    row_limit: 500
+    timeout_s: 15
+
+  # --- cluster health ------------------------------------------------------
+  #
+  # There is a history of ClickHouse disk incidents here, and they are the class
+  # of problem where the answer is visible in one query and invisible everywhere
+  # else: a single table's parts growing, or merges falling behind so parts
+  # accumulate. Both of these exist so that question does not require free-form
+  # SQL under time pressure.
+
+  - name: ch_disk_usage
+    surface: analytics
+    kind: clickhouse
+    description: >-
+      Free and total space on every ClickHouse disk, per node. THE first call
+      for "is ClickHouse full" or "did ingestion stop".
+
+      READ THIS AS PER-NODE. system.disks describes the node that answered the
+      query, not the cluster — if the warehouse is a cluster behind a load
+      balancer, a healthy answer here does not prove every node is healthy. Say
+      which it is in any answer, and do not average across nodes you did not see.
+
+      ClickHouse stops accepting merges and then inserts as free space runs out,
+      so a disk that is nearly full presents as ingestion lag long before it
+      presents as an error.
+    target: ch_prod
+    sql: |
+      SELECT hostName() AS node,
+             name AS disk,
+             path,
+             formatReadableSize(free_space) AS free,
+             formatReadableSize(total_space) AS total,
+             round(100 * (total_space - free_space) / nullIf(total_space, 0), 1)
+               AS used_pct,
+             formatReadableSize(unreserved_space) AS unreserved
+      FROM system.disks
+      ORDER BY used_pct DESC
+    row_limit: 50
+    timeout_s: 15
+
+  - name: ch_table_parts
+    surface: analytics
+    kind: clickhouse
+    description: >-
+      Per-table part count and on-disk size from system.parts (active parts
+      only). Use to find WHICH table is consuming a disk, and to spot merges
+      falling behind.
+
+      INTERPRETATION: a high `parts` count on one table is the signature of
+      merges not keeping up with inserts — commonly too-frequent small inserts,
+      or a merge backlog after a restart. ClickHouse refuses inserts once a
+      partition passes parts_to_throw_insert (300 by default), so a table
+      climbing through the low hundreds is a warning, not a curiosity.
+
+      Sizes are COMPRESSED on-disk bytes for active parts on the node that
+      answered. Inactive parts pending cleanup are excluded and can hold
+      significant space of their own for a while after a merge.
+    target: ch_prod
+    sql: |
+      SELECT database,
+             table,
+             count() AS parts,
+             sum(rows) AS rows,
+             formatReadableSize(sum(bytes_on_disk)) AS on_disk,
+             max(modification_time) AS last_modified
+      FROM system.parts
+      WHERE active
+      GROUP BY database, table
+      ORDER BY sum(bytes_on_disk) DESC
+    row_limit: 200
+    timeout_s: 20
+
+  # --- free-form -----------------------------------------------------------
+
+  - name: ch_query
+    surface: analytics
+    kind: clickhousefree
+    tags: [heavy, pii]
+    description: >-
+      Run a single read-only SELECT against ClickHouse and return the rows. This
+      is how questions about actual DATA get answered — ride and booking counts,
+      event timelines, per-city or per-day breakdowns, "what happened between
+      14:00 and 15:00".
+
+      PREFER A FIXED FUNCTION when one exists: ch_tables, ch_columns,
+      ch_disk_usage and ch_table_parts are narrower, already bounded, and carry
+      their interpretation caveats. Use ch_columns before querying a table whose
+      columns you have not seen — a wrong column name costs a call.
+
+      RULES: one statement only, beginning with SELECT, WITH, SHOW or DESCRIBE.
+      No INSERT, ALTER, DROP, CREATE, OPTIMIZE, SYSTEM or KILL; no `SET`; no
+      second statement after a semicolon. All are refused with the reason, so
+      you can correct and retry. Do not append a FORMAT clause and do not try to
+      set `readonly` — the executor owns both. Table functions that read outside
+      the warehouse (url, s3, file, remote, mysql, postgresql) are refused.
+
+      BOUNDS: always write your own LIMIT and your own time filter. A LIMIT is
+      appended if you omit one, but ClickHouse will still have scanned the
+      table first — an unfiltered query over a large MergeTree is slow for
+      everyone, not only for you. Filter on the partition/sorting key (usually a
+      date or timestamp column; ch_tables shows both) or the query reads
+      everything.
+
+      CAVEATS to state in any answer: counts are as of the moment of the query
+      and ingestion may lag, so a "today" figure is usually incomplete;
+      system.* tables describe the NODE that answered, not the cluster; and
+      `DateTime` columns carry their own timezone, so say which one you used.
+
+      THIS RETURNS REAL BUSINESS DATA. Aggregate wherever the question allows
+      it. Do not select raw identifier or contact columns to "have a look" —
+      output is redacted, but the right amount of personal data to pull for a
+      question that does not need it is none.
+    target: ch_prod
+    params:
+      sql:
+        # statement, not string: SQL needs `;`, `'` and `{`, which the generic
+        # shell-metachar screen rejects. The ClickHouse-aware read-only guard in
+        # app/executors/clickhouse.py is the real check.
+        type: statement
+        required: true
+        max_length: 4000
+        description: >-
+          A single SELECT. Example, for daily volume over the last week:
+          SELECT toDate(created_at) AS day, count() AS n
+          FROM rides
+          WHERE created_at >= now() - INTERVAL 7 DAY
+          GROUP BY day ORDER BY day
+          LIMIT 100
+    row_limit: 500
+    timeout_s: 25

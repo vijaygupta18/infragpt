@@ -1,0 +1,1280 @@
+# infragpt registry — Kubernetes surface (READ-ONLY)
+#
+# Every entry is an ARGV ARRAY. There is no shell anywhere in the k8s path:
+# the executor calls asyncio.create_subprocess_exec with a list, never
+# shell=True and never a joined command string. That is why a shell metachar in
+# a parameter cannot become a command — there is no shell to interpret it.
+#
+# `kubectl` and `--context <resolved>` are prepended by the executor. The LLM
+# never supplies a context, a kubeconfig, or a server URL.
+#
+# The verb (argv[0]) is checked against an allowlist IN CODE as well as here:
+# get, list, describe, logs, top, events, version. Anything else is refused even
+# if it appears in this file.
+#
+# The real enforcement is RBAC: the ServiceAccount this process runs as holds
+# get/list/watch only, so a mutating verb would be denied by the API server even
+# if every layer above failed.
+#
+# `cloud` selects the context: gcp -> GKE prod, aws -> EKS prod. Drivers poll
+# the cloud they registered in, so the cloud must be established from the
+# question, never assumed.
+
+entries:
+  - name: pod_logs
+    surface: k8s:gcp
+    kind: kubectl
+    description: >-
+      Recent log lines from a pod, newest window only. Both the line count and
+      the lookback window are capped — this cannot stream or dump a full log.
+      Log content is PII-redacted before it is returned.
+    target: k8s_$cloud
+    tags: [pii]
+    argv:
+      - logs
+      - $pod
+      - -n
+      - $namespace
+      - -c
+      - $container
+      - --tail=$tail
+      - --since=$since
+      - --timestamps=true
+    params:
+      pod:
+        type: string
+        required: true
+        max_length: 253
+        description: Exact pod name, e.g. driver-offer-bpp-7d9c5f8b6d-abcde.
+      cloud:
+        type: enum
+        required: false
+        default: gcp
+        values: [gcp, aws]
+        description: >-
+          Which cloud. DEFAULTS TO GCP and you should almost always leave it
+          there: this platform is migrating to GCP, and AWS is only worth
+          querying when the question NAMES it. Do not check both "to be safe" —
+          that doubles the cost of every question and, for surfaces AWS cannot
+          reach, produces a failure that reads like a fact about production.
+      namespace:
+        type: enum
+        required: false
+        default: $NAMESPACE_DEFAULT
+        values: $NAMESPACES
+        description: Kubernetes namespace. Defaults to apps.
+      container:
+        type: string
+        required: false
+        max_length: 253
+        description: >-
+          Container name within the pod. Omit for single-container pods.
+      tail:
+        type: int
+        required: false
+        default: 200
+        min: 1
+        max: 1000
+        description: Number of trailing log lines. Hard-capped at 1000.
+      since:
+        type: enum
+        required: false
+        default: 15m
+        values: [5m, 15m, 30m, 1h, 3h, 6h]
+        description: >-
+          Lookback window. Enumerated rather than free-form so no caller can
+          request an unbounded history.
+      grep:
+        type: string
+        required: false
+        max_length: 200
+        description: >-
+          Keep only output lines containing this exact text. Use it whenever the
+          question is about something specific (an error string, a pod name, a
+          status like CrashLoopBackOff) rather than reading everything. It is a
+          literal substring match, not a regex or a glob. Filtering here is far
+          cheaper than returning a whole namespace and reasoning over it.
+      grep_context:
+        type: int
+        required: false
+        default: 0
+        min: 0
+        max: 20
+        description: Lines of surrounding context to keep around each match.
+    timeout_s: 30
+
+  - name: pod_status
+    surface: k8s:gcp
+    kind: kubectl
+    description: >-
+      Status of one pod — phase, readiness, restart count, node and age.
+    target: k8s_$cloud
+    argv: [get, pod, $pod, -n, $namespace, -o, wide]
+    params:
+      pod:
+        type: string
+        required: true
+        max_length: 253
+        description: Exact pod name.
+      cloud:
+        type: enum
+        required: false
+        default: gcp
+        values: [gcp, aws]
+        description: >-
+          Which cloud. DEFAULTS TO GCP and you should almost always leave it
+          there: this platform is migrating to GCP, and AWS is only worth
+          querying when the question NAMES it. Do not check both "to be safe" —
+          that doubles the cost of every question and, for surfaces AWS cannot
+          reach, produces a failure that reads like a fact about production.
+      namespace:
+        type: enum
+        required: false
+        default: $NAMESPACE_DEFAULT
+        values: $NAMESPACES
+        description: Kubernetes namespace. Defaults to apps.
+      grep:
+        type: string
+        required: false
+        max_length: 200
+        description: >-
+          Keep only output lines containing this exact text. Use it whenever the
+          question is about something specific (an error string, a pod name, a
+          status like CrashLoopBackOff) rather than reading everything. It is a
+          literal substring match, not a regex or a glob. Filtering here is far
+          cheaper than returning a whole namespace and reasoning over it.
+      grep_context:
+        type: int
+        required: false
+        default: 0
+        min: 0
+        max: 20
+        description: Lines of surrounding context to keep around each match.
+    timeout_s: 20
+
+  - name: count_pods
+    surface: k8s:gcp
+    kind: kubectl
+    description: >-
+      Pod NAMES only, one per line — use this for "how many pods", "which pods
+      exist", or any question where the answer is a count or a list of names.
+      Prefer it strongly over list_pods for counting: list_pods returns a wide
+      table whose output for a busy namespace runs to tens of thousands of
+      tokens, gets truncated, and then the count cannot be stated exactly. This
+      returns one short line per pod, so the total is exact.
+      It carries NO status, node or restart information. If the question is
+      about health rather than quantity, use list_pods or pod_status instead.
+      The result is already scoped to the requested namespace; the absence of a
+      NAMESPACE column is expected, not a limitation.
+    target: k8s_$cloud
+    argv:
+      - get
+      - pods
+      - -n
+      - $namespace
+      - -o
+      - name
+    params:
+      cloud:
+        type: enum
+        required: false
+        default: gcp
+        values: [gcp, aws]
+        description: >-
+          Which cloud. DEFAULTS TO GCP and you should almost always leave it
+          there: this platform is migrating to GCP, and AWS is only worth
+          querying when the question NAMES it. Do not check both "to be safe" —
+          that doubles the cost of every question and, for surfaces AWS cannot
+          reach, produces a failure that reads like a fact about production.
+      namespace:
+        type: enum
+        required: false
+        default: $NAMESPACE_DEFAULT
+        values: $NAMESPACES
+        description: Namespace to count in. Defaults to apps.
+      grep:
+        type: string
+        required: false
+        max_length: 200
+        description: >-
+          Keep only names containing this exact text, e.g. "rider-app" to count
+          one service's pods. Literal substring, not a regex.
+      grep_context:
+        type: int
+        required: false
+        default: 0
+        min: 0
+        max: 20
+        description: Unused for name lists; present for consistency.
+    row_limit: 2000
+    timeout_s: 20
+
+  - name: list_pods
+    surface: k8s:gcp
+    kind: kubectl
+    description: >-
+      All pods in a namespace with phase, restarts, node and IP. Use to find a
+      pod name before asking for its logs, or to spot CrashLoopBackOff.
+    target: k8s_$cloud
+    argv: [get, pods, -n, $namespace, -o, wide]
+    params:
+      cloud:
+        type: enum
+        required: false
+        default: gcp
+        values: [gcp, aws]
+        description: >-
+          Which cloud. DEFAULTS TO GCP and you should almost always leave it
+          there: this platform is migrating to GCP, and AWS is only worth
+          querying when the question NAMES it. Do not check both "to be safe" —
+          that doubles the cost of every question and, for surfaces AWS cannot
+          reach, produces a failure that reads like a fact about production.
+      namespace:
+        type: enum
+        required: false
+        default: $NAMESPACE_DEFAULT
+        values: $NAMESPACES
+        description: Kubernetes namespace. Defaults to apps.
+      grep:
+        type: string
+        required: false
+        max_length: 200
+        description: >-
+          Keep only output lines containing this exact text. Use it whenever the
+          question is about something specific (an error string, a pod name, a
+          status like CrashLoopBackOff) rather than reading everything. It is a
+          literal substring match, not a regex or a glob. Filtering here is far
+          cheaper than returning a whole namespace and reasoning over it.
+      grep_context:
+        type: int
+        required: false
+        default: 0
+        min: 0
+        max: 20
+        description: Lines of surrounding context to keep around each match.
+    timeout_s: 20
+
+  - name: recent_events
+    surface: k8s:gcp
+    kind: kubectl
+    description: >-
+      Recent cluster events in a namespace, oldest to newest. The fastest way
+      to explain a pending, evicted, OOMKilled or failing-to-schedule pod.
+    target: k8s_$cloud
+    argv: [get, events, -n, $namespace, --sort-by=.lastTimestamp]
+    params:
+      cloud:
+        type: enum
+        required: false
+        default: gcp
+        values: [gcp, aws]
+        description: >-
+          Which cloud. DEFAULTS TO GCP and you should almost always leave it
+          there: this platform is migrating to GCP, and AWS is only worth
+          querying when the question NAMES it. Do not check both "to be safe" —
+          that doubles the cost of every question and, for surfaces AWS cannot
+          reach, produces a failure that reads like a fact about production.
+      namespace:
+        type: enum
+        required: false
+        default: $NAMESPACE_DEFAULT
+        values: $NAMESPACES
+        description: Kubernetes namespace. Defaults to apps.
+      grep:
+        type: string
+        required: false
+        max_length: 200
+        description: >-
+          Keep only output lines containing this exact text. Use it whenever the
+          question is about something specific (an error string, a pod name, a
+          status like CrashLoopBackOff) rather than reading everything. It is a
+          literal substring match, not a regex or a glob. Filtering here is far
+          cheaper than returning a whole namespace and reasoning over it.
+      grep_context:
+        type: int
+        required: false
+        default: 0
+        min: 0
+        max: 20
+        description: Lines of surrounding context to keep around each match.
+    timeout_s: 20
+
+  - name: describe_pod
+    surface: k8s:gcp
+    kind: kubectl
+    description: >-
+      Full description of a pod — containers, images, resource requests and
+      limits, conditions, volumes and the pod's own recent events.
+    target: k8s_$cloud
+    argv: [describe, pod, $pod, -n, $namespace]
+    params:
+      pod:
+        type: string
+        required: true
+        max_length: 253
+        description: Exact pod name.
+      cloud:
+        type: enum
+        required: false
+        default: gcp
+        values: [gcp, aws]
+        description: >-
+          Which cloud. DEFAULTS TO GCP and you should almost always leave it
+          there: this platform is migrating to GCP, and AWS is only worth
+          querying when the question NAMES it. Do not check both "to be safe" —
+          that doubles the cost of every question and, for surfaces AWS cannot
+          reach, produces a failure that reads like a fact about production.
+      namespace:
+        type: enum
+        required: false
+        default: $NAMESPACE_DEFAULT
+        values: $NAMESPACES
+        description: Kubernetes namespace. Defaults to apps.
+      grep:
+        type: string
+        required: false
+        max_length: 200
+        description: >-
+          Keep only output lines containing this exact text. Use it whenever the
+          question is about something specific (an error string, a pod name, a
+          status like CrashLoopBackOff) rather than reading everything. It is a
+          literal substring match, not a regex or a glob. Filtering here is far
+          cheaper than returning a whole namespace and reasoning over it.
+      grep_context:
+        type: int
+        required: false
+        default: 0
+        min: 0
+        max: 20
+        description: Lines of surrounding context to keep around each match.
+    timeout_s: 25
+
+  - name: node_top
+    surface: k8s:gcp
+    kind: kubectl
+    description: >-
+      Live CPU and memory usage per node, from metrics-server. Use to confirm
+      or rule out node saturation.
+    target: k8s_$cloud
+    argv: [top, nodes, --no-headers=false]
+    params:
+      cloud:
+        type: enum
+        required: false
+        default: gcp
+        values: [gcp, aws]
+        description: >-
+          Which cloud. DEFAULTS TO GCP and you should almost always leave it
+          there: this platform is migrating to GCP, and AWS is only worth
+          querying when the question NAMES it. Do not check both "to be safe" —
+          that doubles the cost of every question and, for surfaces AWS cannot
+          reach, produces a failure that reads like a fact about production.
+    timeout_s: 25
+
+  - name: deployment_status
+    surface: k8s:gcp
+    kind: kubectl
+    description: >-
+      Replica counts for a deployment — desired, current, up-to-date and
+      available — plus its images. Use to check a rollout finished.
+    target: k8s_$cloud
+    argv: [get, deployment, $deployment, -n, $namespace, -o, wide]
+    params:
+      deployment:
+        type: string
+        required: true
+        max_length: 253
+        description: Exact deployment name, e.g. driver-offer-bpp.
+      cloud:
+        type: enum
+        required: false
+        default: gcp
+        values: [gcp, aws]
+        description: >-
+          Which cloud. DEFAULTS TO GCP and you should almost always leave it
+          there: this platform is migrating to GCP, and AWS is only worth
+          querying when the question NAMES it. Do not check both "to be safe" —
+          that doubles the cost of every question and, for surfaces AWS cannot
+          reach, produces a failure that reads like a fact about production.
+      namespace:
+        type: enum
+        required: false
+        default: $NAMESPACE_DEFAULT
+        values: $NAMESPACES
+        description: Kubernetes namespace. Defaults to apps.
+      grep:
+        type: string
+        required: false
+        max_length: 200
+        description: >-
+          Keep only output lines containing this exact text. Use it whenever the
+          question is about something specific (an error string, a pod name, a
+          status like CrashLoopBackOff) rather than reading everything. It is a
+          literal substring match, not a regex or a glob. Filtering here is far
+          cheaper than returning a whole namespace and reasoning over it.
+      grep_context:
+        type: int
+        required: false
+        default: 0
+        min: 0
+        max: 20
+        description: Lines of surrounding context to keep around each match.
+    timeout_s: 20
+
+  # ---------------------------------------------------------------------------
+  # Istio service mesh (read-only CRD reads)
+  #
+  # Added after the gateway-VirtualService incident: a VirtualService route
+  # pinned external traffic to a DestinationRule subset, and nobody could see it
+  # from this tool. Pods were Running, Services had endpoints, and the mesh was
+  # still blackholing requests.
+  #
+  # These two list entries are CLUSTER-WIDE (--all-namespaces) on purpose: the
+  # gateway VirtualServices live outside `apps` (usually istio-system), so a
+  # namespace-scoped list would miss exactly the objects that caused the outage.
+  # ---------------------------------------------------------------------------
+
+  - name: istio_virtualservices
+    surface: k8s:gcp
+    kind: kubectl
+    description: >-
+      All Istio VirtualServices in the cluster, across every namespace, with
+      their gateways and hosts. Use when traffic reaches the mesh but not the
+      workload — pods Running and Services populated, yet requests fail or land
+      on the wrong version.
+      INTERPRETATION TRAP: this listing shows gateways and hosts only, NOT the
+      route rules. A VirtualService route can pin traffic to a DestinationRule
+      `subset`, and if that subset's labels select no healthy pods the request
+      blackholes with 503 even though every pod is Ready. To see the routes and
+      subsets you must follow up with describe_virtualservice. Also note the
+      NAMESPACE column: gateway VirtualServices normally live in istio-system,
+      not apps, and a same-host VirtualService in another namespace can
+      silently take precedence.
+    target: k8s_$cloud
+    argv: [get, virtualservices, --all-namespaces]
+    params:
+      cloud:
+        type: enum
+        required: false
+        default: gcp
+        values: [gcp, aws]
+        description: >-
+          Which cloud. DEFAULTS TO GCP and you should almost always leave it
+          there: this platform is migrating to GCP, and AWS is only worth
+          querying when the question NAMES it. Do not check both "to be safe" —
+          that doubles the cost of every question and, for surfaces AWS cannot
+          reach, produces a failure that reads like a fact about production.
+      grep:
+        type: string
+        required: false
+        max_length: 200
+        description: >-
+          Keep only output lines containing this exact text. Use it whenever the
+          question is about something specific (an error string, a pod name, a
+          status like CrashLoopBackOff) rather than reading everything. It is a
+          literal substring match, not a regex or a glob. Filtering here is far
+          cheaper than returning a whole namespace and reasoning over it.
+      grep_context:
+        type: int
+        required: false
+        default: 0
+        min: 0
+        max: 20
+        description: Lines of surrounding context to keep around each match.
+    row_limit: 200
+    timeout_s: 20
+
+  - name: istio_destinationrules
+    surface: k8s:gcp
+    kind: kubectl
+    description: >-
+      All Istio DestinationRules in the cluster, across every namespace, with
+      their hosts. DestinationRules define the `subset` names that a
+      VirtualService route is allowed to reference, plus TLS mode and outlier
+      detection.
+      INTERPRETATION TRAP: a VirtualService naming a subset that no
+      DestinationRule defines produces "no healthy upstream" / 503 UH at the
+      proxy with no Kubernetes event and no pod restart — the failure is invisible
+      from pod-level checks. Pair this with istio_virtualservices whenever mesh
+      routing is suspected, and compare the subset names in both directions.
+      This listing does not show subset label selectors; use `describe` on the
+      workload's pods to confirm the labels actually exist.
+    target: k8s_$cloud
+    argv: [get, destinationrules, --all-namespaces]
+    params:
+      cloud:
+        type: enum
+        required: false
+        default: gcp
+        values: [gcp, aws]
+        description: >-
+          Which cloud. DEFAULTS TO GCP and you should almost always leave it
+          there: this platform is migrating to GCP, and AWS is only worth
+          querying when the question NAMES it. Do not check both "to be safe" —
+          that doubles the cost of every question and, for surfaces AWS cannot
+          reach, produces a failure that reads like a fact about production.
+      grep:
+        type: string
+        required: false
+        max_length: 200
+        description: >-
+          Keep only output lines containing this exact text. Use it whenever the
+          question is about something specific (an error string, a pod name, a
+          status like CrashLoopBackOff) rather than reading everything. It is a
+          literal substring match, not a regex or a glob. Filtering here is far
+          cheaper than returning a whole namespace and reasoning over it.
+      grep_context:
+        type: int
+        required: false
+        default: 0
+        min: 0
+        max: 20
+        description: Lines of surrounding context to keep around each match.
+    row_limit: 200
+    timeout_s: 20
+
+  - name: describe_virtualservice
+    surface: k8s:gcp
+    kind: kubectl
+    description: >-
+      Full spec of one Istio VirtualService — hosts, gateways, HTTP/TLS/TCP
+      route rules, match conditions, destination hosts, subsets and weights,
+      retries and timeouts. This is the entry that actually shows subset pinning
+      and traffic weights; istio_virtualservices only lists names.
+      INTERPRETATION TRAP: a `subset` under route.destination is a reference into
+      a DestinationRule, not a pod selector — confirm the subset exists with
+      istio_destinationrules before concluding routing is correct. Route order
+      matters: the FIRST matching http rule wins, so a broad early match can
+      shadow every rule below it.
+      LIMITATION: only the `apps` namespace is reachable from this tool, so a
+      gateway VirtualService in istio-system can be LISTED by
+      istio_virtualservices but cannot be described here. Say so rather than
+      implying the object does not exist.
+    target: k8s_$cloud
+    argv: [describe, virtualservice, $virtualservice, -n, $namespace]
+    params:
+      virtualservice:
+        type: string
+        required: true
+        max_length: 253
+        description: Exact VirtualService name, from istio_virtualservices.
+      cloud:
+        type: enum
+        required: false
+        default: gcp
+        values: [gcp, aws]
+        description: >-
+          Which cloud. DEFAULTS TO GCP and you should almost always leave it
+          there: this platform is migrating to GCP, and AWS is only worth
+          querying when the question NAMES it. Do not check both "to be safe" —
+          that doubles the cost of every question and, for surfaces AWS cannot
+          reach, produces a failure that reads like a fact about production.
+      namespace:
+        type: enum
+        required: false
+        default: $NAMESPACE_DEFAULT
+        values: $NAMESPACES
+        description: Kubernetes namespace. Only apps is reachable.
+      grep:
+        type: string
+        required: false
+        max_length: 200
+        description: >-
+          Keep only output lines containing this exact text. Use it whenever the
+          question is about something specific (an error string, a pod name, a
+          status like CrashLoopBackOff) rather than reading everything. It is a
+          literal substring match, not a regex or a glob. Filtering here is far
+          cheaper than returning a whole namespace and reasoning over it.
+      grep_context:
+        type: int
+        required: false
+        default: 0
+        min: 0
+        max: 20
+        description: Lines of surrounding context to keep around each match.
+    timeout_s: 25
+
+  # ---------------------------------------------------------------------------
+  # Workload and capacity inventory
+  # ---------------------------------------------------------------------------
+
+  - name: top_pods
+    surface: k8s:gcp
+    kind: kubectl
+    description: >-
+      Live CPU and memory usage per pod in a namespace, from metrics-server. Use
+      to find which pod is consuming a saturated node, or to confirm a suspected
+      memory leak before it OOMKills.
+      INTERPRETATION TRAP: these are INSTANTANEOUS usage values, not requests or
+      limits. A pod near its memory limit is invisible here unless you also read
+      the limit from describe_pod — usage alone cannot tell you how close to
+      OOMKill a pod is. If metrics-server is unavailable this returns an error,
+      which is a metrics-server problem, not evidence the pods are idle.
+    target: k8s_$cloud
+    argv: [top, pods, -n, $namespace, --no-headers=false]
+    params:
+      cloud:
+        type: enum
+        required: false
+        default: gcp
+        values: [gcp, aws]
+        description: >-
+          Which cloud. DEFAULTS TO GCP and you should almost always leave it
+          there: this platform is migrating to GCP, and AWS is only worth
+          querying when the question NAMES it. Do not check both "to be safe" —
+          that doubles the cost of every question and, for surfaces AWS cannot
+          reach, produces a failure that reads like a fact about production.
+      namespace:
+        type: enum
+        required: false
+        default: $NAMESPACE_DEFAULT
+        values: $NAMESPACES
+        description: Kubernetes namespace. Defaults to apps.
+      grep:
+        type: string
+        required: false
+        max_length: 200
+        description: >-
+          Keep only output lines containing this exact text. Use it whenever the
+          question is about something specific (an error string, a pod name, a
+          status like CrashLoopBackOff) rather than reading everything. It is a
+          literal substring match, not a regex or a glob. Filtering here is far
+          cheaper than returning a whole namespace and reasoning over it.
+      grep_context:
+        type: int
+        required: false
+        default: 0
+        min: 0
+        max: 20
+        description: Lines of surrounding context to keep around each match.
+    row_limit: 200
+    timeout_s: 25
+
+  - name: list_pdb
+    surface: k8s:gcp
+    kind: kubectl
+    description: >-
+      PodDisruptionBudgets in a namespace, with MIN AVAILABLE / MAX UNAVAILABLE
+      and ALLOWED DISRUPTIONS. The first thing to check when a node drain,
+      cluster upgrade or autoscaler scale-down is stuck — a past EKS upgrade was
+      blocked by five PDBs and nothing else in the cluster looked wrong.
+      INTERPRETATION TRAP: ALLOWED DISRUPTIONS = 0 means the PDB is currently
+      BLOCKING all voluntary eviction of its pods; that is the stuck-drain
+      signal, and it is not an error state, so nothing will report it as one. A
+      PDB whose selector matches no pods, or whose minAvailable equals the
+      replica count, blocks drains permanently rather than temporarily.
+    target: k8s_$cloud
+    argv: [get, poddisruptionbudgets, -n, $namespace]
+    params:
+      cloud:
+        type: enum
+        required: false
+        default: gcp
+        values: [gcp, aws]
+        description: >-
+          Which cloud. DEFAULTS TO GCP and you should almost always leave it
+          there: this platform is migrating to GCP, and AWS is only worth
+          querying when the question NAMES it. Do not check both "to be safe" —
+          that doubles the cost of every question and, for surfaces AWS cannot
+          reach, produces a failure that reads like a fact about production.
+      namespace:
+        type: enum
+        required: false
+        default: $NAMESPACE_DEFAULT
+        values: $NAMESPACES
+        description: Kubernetes namespace. Defaults to apps.
+    row_limit: 100
+    timeout_s: 20
+
+  - name: list_services
+    surface: k8s:gcp
+    kind: kubectl
+    description: >-
+      Services in a namespace with type, cluster IP, external IP, ports and
+      selector. Use to confirm a service exists and which pods its selector is
+      meant to reach.
+      INTERPRETATION TRAP: a Service having a ClusterIP proves nothing about
+      whether traffic works — a Service whose selector matches no Ready pod has
+      zero endpoints and blackholes silently. The endpoint count is NOT shown
+      here; cross-check with list_pods that pods matching the selector are Ready
+      before concluding the service is healthy.
+    target: k8s_$cloud
+    argv: [get, services, -n, $namespace, -o, wide]
+    params:
+      cloud:
+        type: enum
+        required: false
+        default: gcp
+        values: [gcp, aws]
+        description: >-
+          Which cloud. DEFAULTS TO GCP and you should almost always leave it
+          there: this platform is migrating to GCP, and AWS is only worth
+          querying when the question NAMES it. Do not check both "to be safe" —
+          that doubles the cost of every question and, for surfaces AWS cannot
+          reach, produces a failure that reads like a fact about production.
+      namespace:
+        type: enum
+        required: false
+        default: $NAMESPACE_DEFAULT
+        values: $NAMESPACES
+        description: Kubernetes namespace. Defaults to apps.
+      grep:
+        type: string
+        required: false
+        max_length: 200
+        description: >-
+          Keep only output lines containing this exact text. Use it whenever the
+          question is about something specific (an error string, a pod name, a
+          status like CrashLoopBackOff) rather than reading everything. It is a
+          literal substring match, not a regex or a glob. Filtering here is far
+          cheaper than returning a whole namespace and reasoning over it.
+      grep_context:
+        type: int
+        required: false
+        default: 0
+        min: 0
+        max: 20
+        description: Lines of surrounding context to keep around each match.
+    row_limit: 200
+    timeout_s: 20
+
+  - name: list_statefulsets
+    surface: k8s:gcp
+    kind: kubectl
+    description: >-
+      StatefulSets in a namespace with ready/desired replicas and images.
+      INTERPRETATION TRAP: StatefulSet rollouts are ORDERED and stop at the first
+      pod that never becomes Ready, so a partially-updated StatefulSet is stuck,
+      not slow — the remaining pods will never update on their own. Ready count
+      below desired with no recent event usually means a PVC or a readiness probe,
+      not scheduling.
+    target: k8s_$cloud
+    argv: [get, statefulsets, -n, $namespace, -o, wide]
+    params:
+      cloud:
+        type: enum
+        required: false
+        default: gcp
+        values: [gcp, aws]
+        description: >-
+          Which cloud. DEFAULTS TO GCP and you should almost always leave it
+          there: this platform is migrating to GCP, and AWS is only worth
+          querying when the question NAMES it. Do not check both "to be safe" —
+          that doubles the cost of every question and, for surfaces AWS cannot
+          reach, produces a failure that reads like a fact about production.
+      namespace:
+        type: enum
+        required: false
+        default: $NAMESPACE_DEFAULT
+        values: $NAMESPACES
+        description: Kubernetes namespace. Defaults to apps.
+      grep:
+        type: string
+        required: false
+        max_length: 200
+        description: >-
+          Keep only output lines containing this exact text. Use it whenever the
+          question is about something specific (an error string, a pod name, a
+          status like CrashLoopBackOff) rather than reading everything. It is a
+          literal substring match, not a regex or a glob. Filtering here is far
+          cheaper than returning a whole namespace and reasoning over it.
+      grep_context:
+        type: int
+        required: false
+        default: 0
+        min: 0
+        max: 20
+        description: Lines of surrounding context to keep around each match.
+    row_limit: 100
+    timeout_s: 20
+
+  - name: list_daemonsets
+    surface: k8s:gcp
+    kind: kubectl
+    description: >-
+      DaemonSets in a namespace with desired / current / ready / up-to-date
+      counts and node selector.
+      INTERPRETATION TRAP: DESIRED for a DaemonSet is derived from how many nodes
+      match its selector and tolerations, so DESIRED can fall simply because
+      nodes went away — a shrinking desired count is a node-pool change, not a
+      DaemonSet failure. Ready below desired on a subset of nodes usually means
+      those nodes are tainted or out of resources.
+    target: k8s_$cloud
+    argv: [get, daemonsets, -n, $namespace, -o, wide]
+    params:
+      cloud:
+        type: enum
+        required: false
+        default: gcp
+        values: [gcp, aws]
+        description: >-
+          Which cloud. DEFAULTS TO GCP and you should almost always leave it
+          there: this platform is migrating to GCP, and AWS is only worth
+          querying when the question NAMES it. Do not check both "to be safe" —
+          that doubles the cost of every question and, for surfaces AWS cannot
+          reach, produces a failure that reads like a fact about production.
+      namespace:
+        type: enum
+        required: false
+        default: $NAMESPACE_DEFAULT
+        values: $NAMESPACES
+        description: Kubernetes namespace. Defaults to apps.
+      grep:
+        type: string
+        required: false
+        max_length: 200
+        description: >-
+          Keep only output lines containing this exact text. Use it whenever the
+          question is about something specific (an error string, a pod name, a
+          status like CrashLoopBackOff) rather than reading everything. It is a
+          literal substring match, not a regex or a glob. Filtering here is far
+          cheaper than returning a whole namespace and reasoning over it.
+      grep_context:
+        type: int
+        required: false
+        default: 0
+        min: 0
+        max: 20
+        description: Lines of surrounding context to keep around each match.
+    row_limit: 100
+    timeout_s: 20
+
+  - name: list_cronjobs
+    surface: k8s:gcp
+    kind: kubectl
+    description: >-
+      CronJobs in a namespace with schedule, suspend flag, active count and last
+      schedule time.
+      INTERPRETATION TRAP: SUSPEND=True means the job has not run and will not
+      run — that is the most common cause of "the nightly job stopped" and it
+      produces no error anywhere. LAST SCHEDULE is when a run was STARTED, not
+      whether it succeeded; a recent last-schedule time is not evidence the job
+      worked. Schedules are interpreted in the CronJob's timeZone (UTC when
+      unset), which is not necessarily IST.
+    target: k8s_$cloud
+    argv: [get, cronjobs, -n, $namespace]
+    params:
+      cloud:
+        type: enum
+        required: false
+        default: gcp
+        values: [gcp, aws]
+        description: >-
+          Which cloud. DEFAULTS TO GCP and you should almost always leave it
+          there: this platform is migrating to GCP, and AWS is only worth
+          querying when the question NAMES it. Do not check both "to be safe" —
+          that doubles the cost of every question and, for surfaces AWS cannot
+          reach, produces a failure that reads like a fact about production.
+      namespace:
+        type: enum
+        required: false
+        default: $NAMESPACE_DEFAULT
+        values: $NAMESPACES
+        description: Kubernetes namespace. Defaults to apps.
+      grep:
+        type: string
+        required: false
+        max_length: 200
+        description: >-
+          Keep only output lines containing this exact text. Use it whenever the
+          question is about something specific (an error string, a pod name, a
+          status like CrashLoopBackOff) rather than reading everything. It is a
+          literal substring match, not a regex or a glob. Filtering here is far
+          cheaper than returning a whole namespace and reasoning over it.
+      grep_context:
+        type: int
+        required: false
+        default: 0
+        min: 0
+        max: 20
+        description: Lines of surrounding context to keep around each match.
+    row_limit: 100
+    timeout_s: 20
+
+  - name: list_hpa
+    surface: k8s:gcp
+    kind: kubectl
+    description: >-
+      HorizontalPodAutoscalers in a namespace with targets, min/max replicas and
+      current replicas. Use when a service is saturated and you need to know
+      whether autoscaling is working or has stopped.
+      INTERPRETATION TRAP: TARGETS showing <unknown> means the HPA has NO metric
+      and is therefore not scaling at all — that is a broken autoscaler, not a
+      quiet one. REPLICAS sitting at MAXPODS means there is no headroom left and
+      the HPA cannot help; REPLICAS at MINPODS under load usually means the
+      metric is not rising, not that load is low.
+    target: k8s_$cloud
+    argv: [get, hpa, -n, $namespace]
+    params:
+      cloud:
+        type: enum
+        required: false
+        default: gcp
+        values: [gcp, aws]
+        description: >-
+          Which cloud. DEFAULTS TO GCP and you should almost always leave it
+          there: this platform is migrating to GCP, and AWS is only worth
+          querying when the question NAMES it. Do not check both "to be safe" —
+          that doubles the cost of every question and, for surfaces AWS cannot
+          reach, produces a failure that reads like a fact about production.
+      namespace:
+        type: enum
+        required: false
+        default: $NAMESPACE_DEFAULT
+        values: $NAMESPACES
+        description: Kubernetes namespace. Defaults to apps.
+      grep:
+        type: string
+        required: false
+        max_length: 200
+        description: >-
+          Keep only output lines containing this exact text. Use it whenever the
+          question is about something specific (an error string, a pod name, a
+          status like CrashLoopBackOff) rather than reading everything. It is a
+          literal substring match, not a regex or a glob. Filtering here is far
+          cheaper than returning a whole namespace and reasoning over it.
+      grep_context:
+        type: int
+        required: false
+        default: 0
+        min: 0
+        max: 20
+        description: Lines of surrounding context to keep around each match.
+    row_limit: 100
+    timeout_s: 20
+
+  - name: list_pvc
+    surface: k8s:gcp
+    kind: kubectl
+    description: >-
+      PersistentVolumeClaims in a namespace with status, bound volume, capacity,
+      access mode and storage class.
+      INTERPRETATION TRAP: CAPACITY is the PROVISIONED size, never the used
+      space — this cannot tell you a volume is full, and Bound does not mean
+      there is free space. A Pending PVC is a provisioning or storage-class
+      problem and will hold its pod in Pending indefinitely. An RWO claim can be
+      bound to only one node, so a second replica of an RWO-backed workload will
+      never schedule.
+    target: k8s_$cloud
+    argv: [get, pvc, -n, $namespace]
+    params:
+      cloud:
+        type: enum
+        required: false
+        default: gcp
+        values: [gcp, aws]
+        description: >-
+          Which cloud. DEFAULTS TO GCP and you should almost always leave it
+          there: this platform is migrating to GCP, and AWS is only worth
+          querying when the question NAMES it. Do not check both "to be safe" —
+          that doubles the cost of every question and, for surfaces AWS cannot
+          reach, produces a failure that reads like a fact about production.
+      namespace:
+        type: enum
+        required: false
+        default: $NAMESPACE_DEFAULT
+        values: $NAMESPACES
+        description: Kubernetes namespace. Defaults to apps.
+      grep:
+        type: string
+        required: false
+        max_length: 200
+        description: >-
+          Keep only output lines containing this exact text. Use it whenever the
+          question is about something specific (an error string, a pod name, a
+          status like CrashLoopBackOff) rather than reading everything. It is a
+          literal substring match, not a regex or a glob. Filtering here is far
+          cheaper than returning a whole namespace and reasoning over it.
+      grep_context:
+        type: int
+        required: false
+        default: 0
+        min: 0
+        max: 20
+        description: Lines of surrounding context to keep around each match.
+    row_limit: 100
+    timeout_s: 20
+
+  - name: list_nodes
+    surface: k8s:gcp
+    kind: kubectl
+    description: >-
+      All nodes in the cluster with status, roles, age, version, internal IP and
+      instance type. Cluster-scoped — takes no namespace.
+      INTERPRETATION TRAP: Ready does NOT mean schedulable. A node showing
+      "Ready,SchedulingDisabled" is cordoned and takes no new pods, and a Ready
+      node can still repel pods via taints, which are not shown here — use
+      describe_node to see taints and conditions. Mixed VERSION values across
+      nodes mean a partially completed cluster upgrade.
+    target: k8s_$cloud
+    argv: [get, nodes, -o, wide]
+    params:
+      cloud:
+        type: enum
+        required: false
+        default: gcp
+        values: [gcp, aws]
+        description: >-
+          Which cloud. DEFAULTS TO GCP and you should almost always leave it
+          there: this platform is migrating to GCP, and AWS is only worth
+          querying when the question NAMES it. Do not check both "to be safe" —
+          that doubles the cost of every question and, for surfaces AWS cannot
+          reach, produces a failure that reads like a fact about production.
+      grep:
+        type: string
+        required: false
+        max_length: 200
+        description: >-
+          Keep only output lines containing this exact text. Use it whenever the
+          question is about something specific (an error string, a pod name, a
+          status like CrashLoopBackOff) rather than reading everything. It is a
+          literal substring match, not a regex or a glob. Filtering here is far
+          cheaper than returning a whole namespace and reasoning over it.
+      grep_context:
+        type: int
+        required: false
+        default: 0
+        min: 0
+        max: 20
+        description: Lines of surrounding context to keep around each match.
+    row_limit: 300
+    timeout_s: 25
+
+  - name: describe_node
+    surface: k8s:gcp
+    kind: kubectl
+    description: >-
+      Full description of one node — capacity, allocatable, taints, conditions
+      (MemoryPressure, DiskPressure, PIDPressure), allocated resources and the
+      pods scheduled on it. Use to explain why a pod will not schedule onto a
+      node that looks healthy.
+      INTERPRETATION TRAP: the "Allocated resources" block reports REQUESTS and
+      LIMITS, not actual usage. A node can be 100% requested and nearly idle, or
+      50% requested and saturated. Scheduling is decided on requests; saturation
+      is decided on usage — read this together with node_top, and never quote one
+      as if it were the other.
+    target: k8s_$cloud
+    argv: [describe, node, $node]
+    params:
+      node:
+        type: string
+        required: true
+        max_length: 253
+        description: Exact node name, from list_nodes.
+      cloud:
+        type: enum
+        required: false
+        default: gcp
+        values: [gcp, aws]
+        description: >-
+          Which cloud. DEFAULTS TO GCP and you should almost always leave it
+          there: this platform is migrating to GCP, and AWS is only worth
+          querying when the question NAMES it. Do not check both "to be safe" —
+          that doubles the cost of every question and, for surfaces AWS cannot
+          reach, produces a failure that reads like a fact about production.
+      grep:
+        type: string
+        required: false
+        max_length: 200
+        description: >-
+          Keep only output lines containing this exact text. Use it whenever the
+          question is about something specific (an error string, a pod name, a
+          status like CrashLoopBackOff) rather than reading everything. It is a
+          literal substring match, not a regex or a glob. Filtering here is far
+          cheaper than returning a whole namespace and reasoning over it.
+      grep_context:
+        type: int
+        required: false
+        default: 0
+        min: 0
+        max: 20
+        description: Lines of surrounding context to keep around each match.
+    timeout_s: 25
+
+  - name: describe_deployment
+    surface: k8s:gcp
+    kind: kubectl
+    description: >-
+      Full description of a deployment — strategy, replica status, pod template,
+      images, resource requests and limits, conditions and recent scaling events.
+      Use when deployment_status shows the counts but not why.
+      INTERPRETATION TRAP: the Available condition can be True while the newest
+      ReplicaSet has zero ready pods, because the OLD ReplicaSet is still serving
+      — "available" describes the deployment, not the new version. Check the
+      Progressing condition and the NewReplicaSet line before saying a rollout
+      finished.
+    target: k8s_$cloud
+    argv: [describe, deployment, $deployment, -n, $namespace]
+    params:
+      deployment:
+        type: string
+        required: true
+        max_length: 253
+        description: Exact deployment name, e.g. driver-offer-bpp.
+      cloud:
+        type: enum
+        required: false
+        default: gcp
+        values: [gcp, aws]
+        description: >-
+          Which cloud. DEFAULTS TO GCP and you should almost always leave it
+          there: this platform is migrating to GCP, and AWS is only worth
+          querying when the question NAMES it. Do not check both "to be safe" —
+          that doubles the cost of every question and, for surfaces AWS cannot
+          reach, produces a failure that reads like a fact about production.
+      namespace:
+        type: enum
+        required: false
+        default: $NAMESPACE_DEFAULT
+        values: $NAMESPACES
+        description: Kubernetes namespace. Defaults to apps.
+      grep:
+        type: string
+        required: false
+        max_length: 200
+        description: >-
+          Keep only output lines containing this exact text. Use it whenever the
+          question is about something specific (an error string, a pod name, a
+          status like CrashLoopBackOff) rather than reading everything. It is a
+          literal substring match, not a regex or a glob. Filtering here is far
+          cheaper than returning a whole namespace and reasoning over it.
+      grep_context:
+        type: int
+        required: false
+        default: 0
+        min: 0
+        max: 20
+        description: Lines of surrounding context to keep around each match.
+    timeout_s: 25
+
+  - name: list_namespaces
+    surface: k8s:gcp
+    kind: kubectl
+    description: >-
+      All namespaces in the cluster with status and age. Cluster-scoped.
+      INTERPRETATION TRAP: listing a namespace does not make it readable by this
+      tool. Namespaced reads are restricted to `apps`, so a namespace shown here
+      cannot have its pods, logs or workloads inspected unless it is apps — say
+      that explicitly instead of implying the objects are absent. A namespace
+      stuck Terminating is blocked on a finalizer, not on this tool.
+    target: k8s_$cloud
+    argv: [get, namespaces]
+    params:
+      cloud:
+        type: enum
+        required: false
+        default: gcp
+        values: [gcp, aws]
+        description: >-
+          Which cloud. DEFAULTS TO GCP and you should almost always leave it
+          there: this platform is migrating to GCP, and AWS is only worth
+          querying when the question NAMES it. Do not check both "to be safe" —
+          that doubles the cost of every question and, for surfaces AWS cannot
+          reach, produces a failure that reads like a fact about production.
+    row_limit: 200
+    timeout_s: 20
+
+  # NAMES ONLY (-o name), deliberately. ConfigMap VALUES here routinely
+  # carry credentials, connection strings and API keys that were never meant to
+  # be secrets but are — so dumping values would turn a read-only assistant into
+  # a credential exfiltration path with an audit trail that says "get configmap".
+  # Names answer the real question ("does this config object exist / what config
+  # does this workload have") without ever emitting a value.
+  #
+  # There is deliberately NO Secret entry here, not even a names-only one, and
+  # none must ever be added: listing Secret names leaks the shape of the
+  # credential inventory, and `-o name` on Secrets is one flag away from `-o yaml`.
+
+  # Names-only listings for the workload kinds. Added after a live question —
+  # "which deployments have no PodDisruptionBudget" — where the model had to
+  # list 707 deployments through a wide table, hit the output cap, and then
+  # could not state a total. It tried `kubectl get deployments | wc -l`, which
+  # is correctly refused (there is no shell), so the count stayed unanswerable.
+  # A names-only listing is one short line per object and stays exact.
+  - name: count_deployments
+    surface: k8s:gcp
+    kind: kubectl
+    description: >-
+      Deployment NAMES only, one per line — use for "how many deployments",
+      "which deployments exist", or any question whose answer is a count or a
+      list of names. Prefer it strongly over list_deployments for counting: the
+      wide table for a busy namespace runs to tens of thousands of tokens, gets
+      truncated, and then the total cannot be stated exactly.
+
+      Carries no replica, image or status information. For health, use
+      list_deployments instead.
+    target: k8s_$cloud
+    argv:
+      - get
+      - deployments
+      - -n
+      - $namespace
+      - -o
+      - name
+    params:
+      cloud:
+        type: enum
+        required: false
+        default: gcp
+        values: [gcp, aws]
+        description: >-
+          Which cloud. DEFAULTS TO GCP and you should almost always leave it
+          there: this platform is migrating to GCP, and AWS is only worth
+          querying when the question NAMES it. Do not check both "to be safe" —
+          that doubles the cost of every question and, for surfaces AWS cannot
+          reach, produces a failure that reads like a fact about production.
+      namespace:
+        type: enum
+        required: false
+        default: $NAMESPACE_DEFAULT
+        values: $NAMESPACES
+        description: Namespace to count in. Defaults to apps.
+      grep:
+        type: string
+        required: false
+        max_length: 200
+        description: >-
+          Keep only names containing this exact text. Literal substring, not a
+          regex.
+    row_limit: 2000
+    timeout_s: 30
+
+  - name: count_pdb
+    surface: k8s:gcp
+    kind: kubectl
+    description: >-
+      PodDisruptionBudget NAMES only, one per line. Pair with count_deployments
+      to answer "which workloads have no PDB".
+
+      READ AN EMPTY RESULT CAREFULLY: no PDBs in a namespace means NOTHING there
+      is protected from eviction during a drain or upgrade — which is a finding
+      worth stating plainly, not a blank answer. Verified in this environment on
+      2026-08-19: the apps namespace had zero PDBs against 707 deployments.
+    target: k8s_$cloud
+    argv:
+      - get
+      - poddisruptionbudgets
+      - -n
+      - $namespace
+      - -o
+      - name
+    params:
+      cloud:
+        type: enum
+        required: false
+        default: gcp
+        values: [gcp, aws]
+        description: >-
+          Which cloud. DEFAULTS TO GCP and you should almost always leave it
+          there: this platform is migrating to GCP, and AWS is only worth
+          querying when the question NAMES it. Do not check both "to be safe" —
+          that doubles the cost of every question and, for surfaces AWS cannot
+          reach, produces a failure that reads like a fact about production.
+      namespace:
+        type: enum
+        required: false
+        default: $NAMESPACE_DEFAULT
+        values: $NAMESPACES
+        description: Namespace to look in. Defaults to apps.
+    row_limit: 500
+    timeout_s: 25

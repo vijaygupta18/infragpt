@@ -1,0 +1,212 @@
+# Curated per-subject lookups — the db:entity surface.
+#
+# WHY THIS IS SEPARATE FROM db:read
+#
+# db:read answers questions about the DATABASE and is confined to pg_catalog
+# and information_schema, enforced in the executor. This file is the deliberate
+# exception: a small, fixed set of statements that read real people's records,
+# because the single most common ticket — "driver cleared their dues and still
+# cannot go online" — is unanswerable without them.
+#
+# The containment is that these are FIXED and NARROW, not that they are
+# read-only:
+#   * Every statement filters to ONE subject. There is no "list all blocked
+#     drivers" entry, because a per-subject lookup that can be turned into a
+#     bulk export is an export.
+#   * The subject is identified by a HASH or an id, never a raw phone number.
+#     The salt is not in this system, so a lookup cannot be constructed here
+#     from a phone number alone — see the phone_hash param note.
+#   * They live behind the `casework` role, off the Viewer→Support→Engineer
+#     ladder, so holding an infra-debugging role does not grant them.
+#   * Every call is audited with the identifier used.
+#
+# COLUMN NAMES were read from the Beam schemas in
+# app/provider-platform/dynamic-offer-driver-app/Main/src-read-only/Storage/Beam/
+# and are camelCase there, snake_case in Postgres.
+
+entries:
+  - name: driver_account_state
+    surface: db:entity
+    kind: sql
+    tags: [pii]
+    description: >-
+      The account state of ONE driver: whether they are enabled, blocked,
+      subscribed, have payment pending, and which cloud they registered in.
+      This is the first call for any "driver cannot go online" or "driver is
+      blocked" ticket.
+
+      INTERPRETATION, which the answer should carry:
+      - `subscribed = false` with `payment_pending = true` is the normal shape
+        of an unpaid-dues block. Check driver_dues_summary next.
+      - `blocked = true` is a DIFFERENT mechanism from `subscribed`; read
+        blocked_reason and block_expiry_time before concluding anything.
+      - `cloud_type` is which cloud this driver REGISTERED in. Drivers poll the
+        cloud they registered in, so a driver on AWS is not served by the GCP
+        BPP — this field decides which cloud's Redis and pods are worth looking
+        at at all.
+      - driver_information is KV-cached (Redis key
+        `driverInformation_driverId_<id>{shard}`), so what this returns is the
+        DATABASE row. If it disagrees with the driver's app, suspect a stale
+        cache rather than a wrong row here.
+    target: $db
+    params:
+      driver_id:
+        type: string
+        required: true
+        max_length: 64
+        description: The driver's person id. Use driver_id_from_phone_hash to find it.
+      db:
+        type: enum
+        required: true
+        values: [driver_ro]
+        description: Driver-side only. Riders are not in this table.
+    sql: |
+      SELECT
+        p.id                      AS driver_id,
+        p.cloud_type,
+        p.merchant_operating_city_id,
+        p.created_at              AS registered_at,
+        di.enabled,
+        di.blocked,
+        di.blocked_reason,
+        di.block_expiry_time,
+        di.subscribed,
+        di.payment_pending,
+        di.verified,
+        di.mode,
+        di.on_ride,
+        di.auto_pay_status,
+        di.updated_at             AS driver_info_updated_at
+      FROM person p
+      LEFT JOIN driver_information di ON di.driver_id = p.id
+      WHERE p.id = :driver_id
+    row_limit: 1
+    timeout_s: 10
+
+  - name: driver_id_from_phone_hash
+    surface: db:entity
+    kind: sql
+    tags: [pii]
+    description: >-
+      Resolve a driver's id from the SHA-256 hash of their phone number. Takes
+      a hash, never a phone number — see the param note.
+
+      Returns nothing if the hash does not match. That is a real answer: it
+      usually means the hash was built with a country code included, or over a
+      different salt, not that the driver is absent.
+    target: $db
+    params:
+      phone_hash:
+        type: string
+        required: true
+        max_length: 64
+        description: >-
+          The 64-character hex SHA-256 phone hash. NOT a phone number — this
+          system does not hold the salt, so it cannot compute the hash and will
+          not accept a raw number. The hash is over the bare 10-digit number
+          with NO country code and no `+91`; including one is the usual reason
+          a lookup returns nothing.
+      db:
+        type: enum
+        required: true
+        values: [driver_ro]
+        description: Driver-side only.
+    sql: |
+      SELECT id AS driver_id, cloud_type, created_at AS registered_at
+      FROM person
+      WHERE mobile_number_hash = decode(:phone_hash, 'hex')
+    row_limit: 5
+    timeout_s: 10
+
+  - name: driver_dues_summary
+    surface: db:entity
+    kind: sql
+    tags: [pii]
+    description: >-
+      Outstanding and recent fees for ONE driver, grouped by status and fee
+      type. Use after driver_account_state shows payment_pending or
+      subscribed = false.
+
+      INTERPRETATION: only RECURRING_INVOICE and RECURRING_EXECUTION_INVOICE in
+      PAYMENT_PENDING or PAYMENT_OVERDUE count toward the dues that unsubscribe
+      a driver. MANDATE_REGISTRATION and PAYOUT_REGISTRATION rows do NOT, and
+      counting them is the standard way to reach a wrong conclusion here. A
+      driver is unsubscribed when dues + fee - coins >= the plan's
+      max_credit_limit, so the totals matter, not the row count.
+    target: $db
+    params:
+      driver_id:
+        type: string
+        required: true
+        max_length: 64
+        description: The driver's person id.
+      db:
+        type: enum
+        required: true
+        values: [driver_ro]
+        description: Driver-side only.
+    sql: |
+      SELECT
+        status,
+        fee_type,
+        count(*)                       AS fee_count,
+        sum(platform_fee)              AS platform_fee_total,
+        sum(cgst + sgst)               AS tax_total,
+        sum(amount_paid_by_coin)       AS paid_by_coin_total,
+        min(start_time)                AS earliest_fee_window,
+        max(end_time)                  AS latest_fee_window,
+        max(stage_updated_at)          AS last_stage_update
+      FROM driver_fee
+      WHERE driver_id = :driver_id
+      GROUP BY status, fee_type
+      ORDER BY last_stage_update DESC NULLS LAST
+    row_limit: 50
+    timeout_s: 20
+
+  - name: driver_plan_state
+    surface: db:entity
+    kind: sql
+    tags: [pii]
+    description: >-
+      The subscription plan ONE driver is on: plan type, mandate state, free
+      trial, and any waive-off. Use when dues look settled but the driver is
+      still unsubscribed.
+
+      INTERPRETATION: `subscribed` on driver_information is recomputed from
+      dues against the plan's credit limit, so the plan is half of that
+      comparison — a driver moved to a plan with a lower limit can be
+      unsubscribed without any new dues. This table has no `is_active` or
+      `payment_mode` column; the fields that matter are plan_type and
+      auto_pay_status.
+    target: $db
+    params:
+      driver_id:
+        type: string
+        required: true
+        max_length: 64
+        description: The driver's person id.
+      db:
+        type: enum
+        required: true
+        values: [driver_ro]
+        description: Driver-side only.
+    sql: |
+      SELECT
+        dp.driver_id,
+        dp.plan_id,
+        dp.plan_type,
+        dp.service_name,
+        dp.vehicle_category,
+        dp.is_on_free_trial,
+        dp.mandate_id,
+        dp.mandate_setup_date,
+        dp.enable_service_usage_charge,
+        dp.waive_of_mode,
+        dp.waive_off_valid_till,
+        dp.waiver_off_percentage,
+        dp.last_bill_generated_at,
+        dp.updated_at
+      FROM driver_plan dp
+      WHERE dp.driver_id = :driver_id
+    row_limit: 5
+    timeout_s: 10

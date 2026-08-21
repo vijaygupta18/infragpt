@@ -1,0 +1,95 @@
+# infragpt registry — read-only command execution.
+#
+# The one entry where the model composes a command instead of choosing a
+# pre-registered one. It exists because a registry cannot cover every question,
+# and the alternative — listing something and then asking the user to fetch the
+# next thing themselves — is not an answer.
+#
+# Read-only is enforced in four independent places, in the order that matters:
+#   1. The pod's credentials. Viewer-only GCP roles, get/list/watch k8s SA with
+#      no Secrets or ConfigMaps, SELECT-only DB role on physical replicas. This
+#      is what makes mutation impossible; the rest reduce blast radius.
+#   2. No shell. shlex + execve on an argv list — no pipes, no `;`, no `$( )`.
+#   3. app/shell/guard.py — six binaries, read verbs only, and reads that leak
+#      credentials (kubectl get secret) refused.
+#   4. This grant. `shell:read` is in no role by default.
+
+entries:
+  - name: run_read_command
+    surface: shell:read
+    kind: shell
+    tags: [dangerous, pii]
+    description: >-
+      Run a READ-ONLY command and return its output. Use this when no registered
+      function covers the question, or when a question needs a shape the
+      registry does not offer — a specific jsonpath, a label selector, a
+      gcloud/aws describe, a curl against a metrics API.
+
+      INSTALLED: kubectl, gcloud, gsutil, bq, aws, psql, redis-cli, curl.
+
+      ALLOWED VERBS: kubectl (get, describe, logs, top, events, version,
+      explain, api-resources); gcloud (describe, list, info, read, get-*) —
+      `gcloud logging read` is the route to GCP Cloud Logging; gsutil (ls, du,
+      stat, hash); bq (ls, show, head); aws (describe-*, list-*, get-*, ls);
+      psql -c with a single SELECT; redis-cli read commands; curl GET or HEAD.
+
+      TWO READ COMMANDS ARE STILL REFUSED, and the reason is worth knowing so
+      you do not retry them: `gsutil cat` reads object CONTENTS, which may be
+      anything including credentials; `bq query` executes DML and DDL as readily
+      as SELECT and this guard is handed a command, not parsed SQL. Use
+      `bq head` to read rows.
+
+      PREFER A REGISTERED FUNCTION when one exists — alloydb_*,
+      gcp_metric_search / gcp_metric_query, query_insights_*, elasticache_* all
+      call the cloud APIs directly and are narrower, bounded and already tuned.
+
+      REFUSED, and the refusal comes back to you with the reason so you can
+      retry: any write verb; kubectl exec, port-forward, cp, apply, delete,
+      patch, scale; reading Secrets, ConfigMaps or ServiceAccounts (a read that
+      leaks credentials is still refused); shell metacharacters; curl with a
+      body.
+
+      HOW TO USE IT WELL:
+      - Prefer a registered function when one fits — they are narrower, bounded
+        and already tuned for these clusters.
+      - There is NO SHELL, so pipes, `;`, `$(...)`, `>` and globs do not work.
+        Use the tool's own filtering instead: `-o jsonpath=...`,
+        `--field-selector`, `-l app=x`, `--tail`, `LIMIT`.
+      - GCP is the local cluster: kubectl needs no --context and none should be
+        supplied. AWS requires a kubeconfig context that may not be present.
+      - DO NOT GUESS HOSTNAMES. There is no host called `prometheus`. Metrics
+        live in VictoriaMetrics and are already covered by the metrics
+        functions — use api_error_counts / api_error_rates / metric_names
+        instead of curling a URL you have inferred. A guessed host fails with
+        "could not resolve", which costs a round and tells you nothing new.
+      - If a command fails, READ THE ERROR AND FIX IT. "unknown flag",
+        "NotFound", "context does not exist" each tell you exactly what to
+        change. Retry with a corrected command rather than giving up or asking
+        the user to run it.
+      - Output is capped. Narrow the command rather than asking for everything.
+    target: local
+    params:
+      command:
+        # STATEMENT, not string: a command legitimately contains quotes, `=` and
+        # SQL punctuation, and the generic shell-metachar screen rejected all of
+        # them with "contains forbidden character" — a refusal the model could
+        # not comply with. The command-aware guard in app/shell/guard.py is the
+        # real check and catches strictly more.
+        type: statement
+        required: true
+        max_length: 1200
+        description: >-
+          The full command, e.g. `kubectl get pods -n apps -o name`,
+          `gcloud alloydb instances list --cluster=<ALLOYDB_CLUSTER>
+          --region=us-central1 --project=<GCP_PROJECT>`, or
+          `psql -h HOST -U USER -d DB -c "SELECT count(*) FROM pg_stat_activity"`.
+          Quoting is honoured; shell syntax is not.
+      why:
+        type: string
+        required: false
+        max_length: 300
+        description: >-
+          One line on what you are trying to establish. Recorded in the audit
+          log next to the command, so a reviewer can see intent as well as text.
+    row_limit: 1
+    timeout_s: 30
