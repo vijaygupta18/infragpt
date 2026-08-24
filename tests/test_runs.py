@@ -108,3 +108,33 @@ async def test_the_buffer_is_bounded_and_drops_from_the_front():
     # than running off the end.
     seen = [e async for e in run.subscribe(10)]
     assert len(seen) == MAX_BUFFERED_EVENTS
+
+
+@pytest.mark.anyio
+async def test_reattach_index_lines_up_with_the_buffer_exactly():
+    """A client that counted N events and reattaches with after=N misses
+    nothing and repeats nothing.
+
+    This is the contract the whole reattach design leans on, and it is easy to
+    break from either side — the server once published the run id into the
+    buffer while also sending it as an attach preamble, so a counting client
+    was one ahead and silently skipped a real event per reattach.
+    """
+    reg = RunRegistry()
+    run = reg.create("a@x", "q")
+    for i in range(7):
+        run.publish("call", {"id": i})
+
+    # Client saw 4, drops, reattaches.
+    seen = []
+    agen = run.subscribe(0)
+    for _ in range(4):
+        seen.append(await agen.__anext__())
+    await agen.aclose()
+
+    run.publish("call", {"id": 7})
+    run.finish("done")
+
+    rest = [e async for e in run.subscribe(len(seen))]
+    ids = [int(e.split('"id": ')[1].rstrip("}")) for e in seen + rest]
+    assert ids == [0, 1, 2, 3, 4, 5, 6, 7], f"gap or repeat: {ids}"

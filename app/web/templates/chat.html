@@ -841,10 +841,22 @@ details.spine:not([open]) > .spine-head { margin-bottom: 0; }
     var evIndex = 0;
 
     function handle(ev) {
-      evIndex++;
+      /* evIndex mirrors the SERVER's buffer position, and `after=` on
+         reattach is trusted to line up with it exactly. The 'run' preamble is
+         sent on every attach and is not in the buffer, so it must not be
+         counted — counting it would skip one real event per reattach, and a
+         silently missing call row is the sort of bug nobody ever reports. */
+      if (ev.type !== 'run') {
+        evIndex++;
+        handle.evIndex = evIndex;
+      }
+      if (ev.type === 'answer' || ev.type === 'error' || ev.type === 'stopped') {
+        handle.done = true;
+      }
       if (ev.type === 'run') {
         /* Remember the run so a reload can reattach to work already going. */
         runId = ev.run_id;
+        handle.runId = runId;
         try { localStorage.setItem('infragpt.run', JSON.stringify(
           { id: runId, question: question, at: Date.now() })); } catch (e) { /* private mode */ }
         activity.onStop(function () {
@@ -925,7 +937,55 @@ details.spine:not([open]) > .spine-head { margin-bottom: 0; }
         turn.appendChild(el('div', 'answer err', ev.detail));
       }
     }
+    handle.done = false;
+    handle.runId = null;
+    handle.evIndex = 0;
     return handle;
+  }
+
+  /* Keep a turn attached to its run until the run actually ends.
+
+     The stream and the run are different things: the run survives a dropped
+     socket, and sockets DO drop — the load balancer in front of this app cuts
+     any request at its own timeout, which is shorter than the answer budget.
+     So when the stream dies mid-run, rejoin from where we left off (the server
+     replays only the gap) and keep going. The user should never learn the LB's
+     timeout exists.
+
+     Gives up only after several consecutive failures to CONNECT — a stream
+     that connects and later drops resets the counter, because progress was
+     made. */
+  function followRun(handle) {
+    var failures = 0;
+    function attempt() {
+      if (handle.done || !handle.runId) { return Promise.resolve(); }
+      var from = handle.evIndex || 0;
+      return fetch('/ask/runs/' + encodeURIComponent(handle.runId) + '/stream?after=' + from)
+        .then(function (r) {
+          if (!r.ok || !r.body) { throw new Error('HTTP ' + r.status); }
+          failures = 0;
+          return pumpEvents(r, handle);
+        })
+        .then(function () {
+          if (handle.done) { return; }
+          /* Stream ended but the run has not: the LB cut us off. Rejoin. */
+          return attempt();
+        })
+        .catch(function () {
+          failures++;
+          if (handle.done || failures >= 5) {
+            if (!handle.done) {
+              handle({ type: 'error',
+                       detail: 'Lost the connection and could not rejoin. '
+                             + 'The question may still be running — reload to check.' });
+            }
+            return;
+          }
+          return new Promise(function (res) { setTimeout(res, 1000 * failures); })
+            .then(attempt);
+        });
+    }
+    return attempt();
   }
 
   form.addEventListener('submit', function (e) {
@@ -959,15 +1019,15 @@ details.spine:not([open]) > .spine-head { margin-bottom: 0; }
       }
       return pumpEvents(r, handle);
     }).catch(function (err) {
-      /* A dropped connection is NOT a dead question any more. The run keeps
-         going server-side, so say so and offer to rejoin rather than
-         reporting a failure that did not happen. */
-      if (runId) {
-        handle({ type: 'error',
-                 detail: 'Lost the connection. The question is still running — reload to rejoin it.' });
-      } else {
+      /* A dropped POST before the run id arrived is a real failure; after it
+         arrived, followRun below takes over and rejoins. */
+      if (!handle.runId) {
         handle({ type: 'error', detail: 'Request failed: ' + err });
       }
+    }).then(function () {
+      /* The stream can end while the run has not — the LB cuts long requests.
+         Stay attached until the run itself finishes. */
+      return followRun(handle);
     }).then(function () {
       send.disabled = false;
       input.focus();
@@ -999,16 +1059,17 @@ details.spine:not([open]) > .spine-head { margin-bottom: 0; }
 
         var handle = makeHandler(turn, activity, info.question);
         send.disabled = true;
-        /* after=0 replays the whole run, so the rejoined page shows what it
-           would have shown had the tab never closed. */
-        fetch('/ask/runs/' + encodeURIComponent(info.run_id) + '/stream?after=0')
-          .then(function (r) {
-            if (!r.ok || !r.body) { throw new Error('could not rejoin'); }
-            return pumpEvents(r, handle);
-          })
-          .catch(function () {
-            activity.finish('lost');
-            note.textContent = 'That question could not be rejoined.';
+        /* followRun starts at handle.evIndex (0 for a fresh rejoin), so the
+           whole run replays and the page shows what it would have shown had
+           the tab never closed — then it stays attached through any further
+           drops until the run truly ends. */
+        handle.runId = info.run_id;
+        followRun(handle)
+          .then(function () {
+            if (!handle.done) {
+              activity.finish('lost');
+              note.textContent = 'That question could not be rejoined.';
+            }
           })
           .then(function () { send.disabled = false; });
       })

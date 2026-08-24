@@ -636,7 +636,10 @@ async def ask_stream(
             run.finish("error")
 
     run.task = asyncio.create_task(work())
-    run.publish("run", {"run_id": run.id})
+    # The run id is NOT published into the buffer — _attach sends it as a
+    # preamble on every attach. Publishing it too would put an event in the
+    # buffer that the client must not count, and the client's event count is
+    # what makes `after=` line up with the buffer on reattach. One source.
     return _attach(run, from_index=0)
 
 
@@ -695,8 +698,29 @@ def _attach(run: Run, from_index: int) -> StreamingResponse:
         # The id goes first on every attach, including reattaches, so the client
         # never has to remember which run it is watching.
         yield f'data: {json.dumps({"type": "run", "run_id": run.id})}\n\n'
-        async for item in run.subscribe(from_index):
-            yield f"data: {item}\n\n"
+        # Heartbeat during quiet stretches. A slow call can hold the stream
+        # silent for 30s+, and every idle-timeout between here and the browser
+        # (mesh sidecar, proxy, LB) is entitled to kill a silent stream. An SSE
+        # comment is invisible to the parser and resets those clocks. It does
+        # NOT extend the load balancer's total-duration cap — nothing can; the
+        # client survives that one by reattaching.
+        sub = run.subscribe(from_index)
+        nxt = asyncio.ensure_future(anext(sub))
+        try:
+            while True:
+                done, _ = await asyncio.wait({nxt}, timeout=15)
+                if not done:
+                    yield ": keepalive\n\n"
+                    continue
+                try:
+                    item = nxt.result()
+                except StopAsyncIteration:
+                    break
+                yield f"data: {item}\n\n"
+                nxt = asyncio.ensure_future(anext(sub))
+        finally:
+            nxt.cancel()
+            await sub.aclose()
 
     return StreamingResponse(
         events(),
