@@ -122,7 +122,10 @@ class GridClient:
         question: str,
         tool_specs: list[dict[str, Any]],
         context: str = "",
-        max_calls: int = config.MAX_CALLS_PER_QUESTION,
+        # Parse sanity for ONE model response, not a policy: the question's
+        # real bound is the time budget in the ask loop. A response carrying
+        # hundreds of tool calls is a malformed generation, not a plan.
+        max_calls: int = 200,
     ) -> Selection:
         """Choose registry functions to run. Never returns a command."""
         # Checked before model config on purpose: a caller with no grants should

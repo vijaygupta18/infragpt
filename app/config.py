@@ -442,7 +442,21 @@ CLI_TOKEN_TTL_HOURS = int(_env("CLI_TOKEN_TTL_HOURS", "12"))
 # ceiling exists to stop a runaway loop, not to cut short a thorough one — and
 # evidence is now budgeted per call, so a long chain degrades by trimming each
 # result rather than by dropping the last and most decisive one.
-MAX_CALLS_PER_QUESTION = 30
+# The investigation is bounded by TIME, not by a call count.
+#
+# The call ceiling kept being wrong in the same direction: 8 was too few, then
+# 30 was hit by a legitimate error-triage chain, and every bump re-ran the same
+# argument. The quantity that actually matters to a person waiting is the WAIT,
+# so that is the quantity that is capped. Within the window the loop may call
+# whatever it needs; when the window closes it stops selecting and synthesises
+# from whatever it has, saying plainly that the picture is partial.
+#
+# A time cap also cannot be gamed into a partial answer that looks whole — the
+# failure the old cap produced when the loop spent its budget one call short of
+# the decisive read. The real protections are unchanged and always on: every
+# call has its own timeout and row cap, the DB pool holds 5 connections so no
+# question can exhaust a reader, and the credentials cannot write.
+ANSWER_TIME_BUDGET_S = int(_env("INFRAGPT_ANSWER_TIME_BUDGET_S", "600"))
 # 0 = UNLIMITED, and that is the default for both.
 #
 # Same lesson as the daily token budget: a limit sized against a hypothetical

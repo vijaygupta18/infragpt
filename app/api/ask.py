@@ -92,19 +92,20 @@ def _history(storage: Storage, conversation_id: int, exclude_last: bool = True) 
 
 # Selection happens in rounds so a question like "list the caches, then check each
 # for evictions" can work: round 1 discovers the identifiers, round 2 uses them.
-# Bounded at 2 because the useful case is discover-then-inspect, and an unbounded
-# agent loop against production is not something to add casually. The total call
-# budget (config.MAX_CALLS_PER_QUESTION) still applies across all rounds.
-# A real investigation is not two steps. Find the pods, read their logs, notice a
-# connection error, check the database, confirm against a metric — and when a
-# command is wrong, read the error and retry it. Observed live at 2 rounds: asked
-# which errors were frequent in the driver app, it listed pods, ran out of
-# rounds, and asked the user to fetch the logs — with pod_logs sitting unused.
 #
-# 6 rounds bounded by MAX_CALLS_PER_QUESTION, so this is a bounded loop rather
-# than an open-ended agent: it can iterate and self-correct, but it cannot run
-# away. Every call is still guarded, credential-limited and audited.
-MAX_SELECTION_ROUNDS = 12
+# The loop is bounded by TIME (config.ANSWER_TIME_BUDGET_S), not by a round or
+# call count. Every count chosen here was wrong within a week — 2 rounds
+# stranded an investigation with pod_logs unused, 30 calls cut off an
+# error-triage chain one read short — because a count is a proxy for the thing
+# that actually matters, which is how long someone is left waiting. So the wait
+# is what is capped. Within the window the selector may keep going; when the
+# window closes, the loop stops selecting and synthesises from what it has,
+# and the answer says the picture is partial rather than passing it off as
+# complete.
+#
+# What stops a runaway is unchanged: each call has its own timeout, the DB pool
+# is capped, credentials cannot write, duplicate calls are dropped, and the
+# loop ends the moment a follow-up selection asks for nothing.
 
 
 class AskRequest(BaseModel):
@@ -336,10 +337,10 @@ async def _answer(
         return AskResponse(conversation_id=conv.id, answer=answer, calls=[])
 
     calls_out: list[ToolCallOut] = []
-    rounds = 0
+    deadline = started + config.ANSWER_TIME_BUDGET_S
+    out_of_time = False
     pending = list(selection.calls)
     while pending:
-        rounds += 1
         await _say("stage", stage="running",
                    detail=", ".join(c.name for c in pending))
         before = len(calls_out)
@@ -348,10 +349,11 @@ async def _answer(
             say=_say, first_index=before,
         )
         pending = []
-        if rounds >= MAX_SELECTION_ROUNDS:
-            break
-        remaining = config.MAX_CALLS_PER_QUESTION - len(calls_out)
-        if remaining <= 0:
+        if time.monotonic() >= deadline:
+            # The window has closed. Stop SELECTING — never stop mid-round, so
+            # every result the model asked for is either complete or absent,
+            # and answer from what is in hand.
+            out_of_time = True
             break
         # Give the selector what came back and let it ask for follow-ups. It
         # returns nothing when the question is already answered, which is the
@@ -371,7 +373,6 @@ async def _answer(
                     "you have the identifiers and the functions to act on them. "
                     "Do not repeat a call you already made with the same arguments."
                 ),
-                max_calls=remaining,
             )
         except GridError:
             break  # a failed follow-up must not lose the answer we already have
@@ -381,8 +382,21 @@ async def _answer(
             c for c in follow.calls if (c.name, str(c.arguments)) not in already
         ]
 
-    await _say("stage", stage="synthesizing",
-               detail=f"reading {len(calls_out)} result(s)")
+    if out_of_time:
+        elapsed = int(time.monotonic() - started)
+        await _say("stage", stage="synthesizing",
+                   detail=f"time budget reached after {elapsed}s — "
+                          f"summarising {len(calls_out)} result(s)")
+        selector_context += (
+            "\n\nIMPORTANT: the investigation hit its time budget before it "
+            "finished. Answer from the evidence above, state clearly that the "
+            "picture is PARTIAL, and name what you would have checked next — "
+            "an incomplete answer that says so is useful; one that pretends to "
+            "be complete is dangerous."
+        )
+    else:
+        await _say("stage", stage="synthesizing",
+                   detail=f"reading {len(calls_out)} result(s)")
     # Stream the answer when someone is watching. Synthesis is the longest
     # single wait in a question, and a spinner for twenty seconds after the
     # evidence is already in reads as a hang. Streaming changes nothing about

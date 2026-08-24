@@ -34,6 +34,8 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
 
+from app import config
+
 #: Buffered events per run. Long enough to replay a full question, bounded so a
 #: pathological run cannot grow without limit. Older events are dropped from the
 #: front; a reattaching client is told when that happened rather than being
@@ -41,7 +43,9 @@ from typing import Any
 MAX_BUFFERED_EVENTS = 2_000
 
 #: A run with nobody attached still finishes, but it must not live forever.
-MAX_RUN_SECONDS = 900
+#: Sized FROM the answer budget rather than alongside it — a fixed 900 silently
+#: became a second, hidden time limit the day the budget was raised above it.
+MAX_RUN_SECONDS = config.ANSWER_TIME_BUDGET_S + 300
 
 #: How long a finished run stays readable, so a page that reloads after the
 #: answer arrived still finds it.

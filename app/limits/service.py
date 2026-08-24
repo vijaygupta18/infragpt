@@ -17,9 +17,6 @@ from app.storage.db import Database
 _HOUR = 3600
 
 
-class CallBudgetExceeded(RuntimeError):
-    """Raised when one question tries to make more calls than it may."""
-
 
 class Limits:
     def __init__(
@@ -60,22 +57,6 @@ class Limits:
     def consume_call(self, user_id: int) -> RateVerdict:
         return self.rate.hit(user_id, KIND_CALL, config.CALLS_PER_HOUR, _HOUR)
 
-    @staticmethod
-    def assert_calls_within_question(count: int) -> None:
-        """Guard the per-question fan-out.
-
-        This is the limit that stops one question from turning into an
-        unbounded sweep of production readers, so it raises rather than
-        returning a verdict — there is no sensible "carry on with fewer calls"
-        branch for a caller to ignore.
-        """
-        if count > config.MAX_CALLS_PER_QUESTION:
-            raise CallBudgetExceeded(
-                f"a single question may make at most "
-                f"{config.MAX_CALLS_PER_QUESTION} registry calls; "
-                f"{count} were selected"
-            )
-
     # -- tokens -------------------------------------------------------------
 
     def check_tokens(self, user_id: int) -> BudgetVerdict:
@@ -107,7 +88,6 @@ def reset_limits(limits: Limits | None = None) -> None:
 
 
 __all__ = [
-    "CallBudgetExceeded",
     "Limits",
     "get_limits",
     "reset_limits",

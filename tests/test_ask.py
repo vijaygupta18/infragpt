@@ -680,3 +680,88 @@ async def test_call_start_precedes_result_and_ids_match(monkeypatch):
     assert all("query" in s["params"] for s in starts)
     # Results are ordered as the model asked, regardless of completion order.
     assert [c.entry_name for c in out] == ["one", "two", "three"]
+
+
+class EndlessGrid(FakeGrid):
+    """A selector that always wants one more, different call.
+
+    Under a round or call cap this grid was un-writable-against — the cap
+    stopped it. Now only the clock can, which is exactly what this proves.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(Selection(calls=[]))
+        self.round = 0
+        self.contexts: list[str] = []
+
+    async def select(self, question, tool_specs, context="", max_calls=200):  # noqa: ANN001,ANN201
+        self.round += 1
+        self.contexts.append(context)
+        # Different args every round, so dedupe never ends the loop for us.
+        call = ToolCall("pod_status", {"service": f"svc-{self.round}", "cloud": "gcp"})
+        return Selection(calls=[call])
+
+    async def synthesize(self, question, evidence, context=""):  # noqa: ANN001,ANN201
+        self.evidence = evidence
+        self.synth_context = context
+        return self.answer, Usage(7, 3)
+
+
+def test_time_budget_ends_the_loop_and_admits_it(env, key, monkeypatch) -> None:
+    """An expired budget stops SELECTION and the answer says it is partial.
+
+    Zero budget on purpose: the deadline is already behind us after round one,
+    so with a selector that would go forever, exactly one round runs. The
+    synthesiser must be told the picture is partial — an incomplete answer that
+    says so is useful; one that pretends to be complete is dangerous.
+    """
+    client, _ = env
+    _activate("eng@example.com", Surface.K8S_GCP)
+    monkeypatch.setattr(config, "ANSWER_TIME_BUDGET_S", 0)
+    fake = EndlessGrid()
+    _install_grid(monkeypatch, fake)
+    _install_dispatch(
+        monkeypatch,
+        {"pod_status": ExecResult(ok=True, entry_name="pod_status", target="k8s_gcp",
+                                  text="ok")},
+    )
+
+    data = client.post("/ask", json={"question": "sweep everything"},
+                       headers=_headers(key[0], "eng@example.com")).json()
+
+    assert fake.round == 1, "selection kept going after the budget expired"
+    assert len(data["calls"]) == 1
+    assert "PARTIAL" in fake.synth_context
+    assert "time budget" in fake.synth_context
+
+
+def test_within_budget_the_loop_is_not_capped_by_a_count(env, key, monkeypatch) -> None:
+    """Many rounds are fine while there is time.
+
+    The old MAX_SELECTION_ROUNDS/MAX_CALLS_PER_QUESTION pair would have cut
+    this off; the clock does not care how many calls thoroughness takes.
+    """
+    client, _ = env
+    _activate("eng@example.com", Surface.K8S_GCP)
+    monkeypatch.setattr(config, "ANSWER_TIME_BUDGET_S", 600)
+
+    class FortyRounds(EndlessGrid):
+        async def select(self, question, tool_specs, context="", max_calls=200):  # noqa: ANN001,ANN201
+            self.round += 1
+            if self.round > 40:
+                return Selection(calls=[])
+            call = ToolCall("pod_status", {"service": f"svc-{self.round}", "cloud": "gcp"})
+            return Selection(calls=[call])
+
+    fake = FortyRounds()
+    _install_grid(monkeypatch, fake)
+    _install_dispatch(
+        monkeypatch,
+        {"pod_status": ExecResult(ok=True, entry_name="pod_status", target="k8s_gcp",
+                                  text="ok")},
+    )
+
+    data = client.post("/ask", json={"question": "deep sweep"},
+                       headers=_headers(key[0], "eng@example.com")).json()
+    assert len(data["calls"]) == 40, "a count limit is back"
+    assert "PARTIAL" not in getattr(fake, "synth_context", "")

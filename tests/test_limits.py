@@ -13,7 +13,7 @@ import pytest
 from app import config, coverage
 from app.limits.budget import TokenBudget
 from app.limits.rate import KIND_CALL, KIND_QUESTION, RateLimiter
-from app.limits.service import CallBudgetExceeded, Limits, get_limits, reset_limits
+from app.limits.service import Limits, get_limits, reset_limits
 from app.storage.db import Database
 
 
@@ -354,12 +354,6 @@ def test_a_configured_limit_still_applies(db: Database) -> None:
     for _ in range(3):
         assert limits.rate.hit(1, "question", 3, 3600).allowed
     assert not limits.rate.check(1, "question", 3, 3600).allowed
-
-
-def test_per_question_call_fanout_is_capped() -> None:
-    Limits.assert_calls_within_question(config.MAX_CALLS_PER_QUESTION)
-    with pytest.raises(CallBudgetExceeded, match="at most"):
-        Limits.assert_calls_within_question(config.MAX_CALLS_PER_QUESTION + 1)
 
 
 def test_get_limits_singleton_is_resettable(db: Database) -> None:

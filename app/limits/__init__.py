@@ -2,9 +2,10 @@
 
 Two separate controls with two different jobs:
 
-* **Rate limits** protect *infrastructure*. A question fans out to as many as
-  ``MAX_CALLS_PER_QUESTION`` reads against production readers, so an unbounded
-  question rate is an unbounded query rate against AlloyDB.
+* **Rate limits** protect *infrastructure*. A question fans out to many reads
+  against production readers (bounded by ``ANSWER_TIME_BUDGET_S``, not a call
+  count), so an unbounded question rate is an unbounded query rate against
+  AlloyDB.
 * **Token budgets** protect *spend*. They are per-user and per-UTC-day.
 
 Both **refuse** when exceeded. Neither degrades, truncates, or silently drops
