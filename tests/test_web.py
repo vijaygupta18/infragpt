@@ -221,13 +221,13 @@ def test_admin_console_lists_pending_queue_and_surfaces(client, admin) -> None:
     assert resp.status_code == 200
     # Assert structure, not copy — wording is design material and will change.
     assert "waiting@example.com" in resp.text
-    # Role granting is offered as a DROPDOWN, not a button per role: with three
-    # roles the cards were wider than the decision they supported.
-    assert 'data-rolepick=' in resp.text
+    # Roles are offered as CHECKBOXES — they compose, and approval is the
+    # moment most grants are decided, so it must express the same thing the
+    # role editor in the table can.
+    assert 'data-approvebox=' in resp.text
     for key in ("infra", "analytics", "admin"):
         assert f'value="{key}"' in resp.text, key
     assert "data-approve=" in resp.text
-    assert 'data-rolepick=' in resp.text
     # Every role must be offered — an admin should never have to leave this
     # screen to work out how to grant the access someone needs.
     for role in ROLES:

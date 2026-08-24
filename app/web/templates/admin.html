@@ -131,6 +131,30 @@ details.role-detail summary:hover { color: var(--ink); }
 }
 .rolemenu-actions button { font-size: .78rem; padding: .22rem .6rem; }
 
+.approve-row { max-width: 34rem; }
+.approve-summary {
+  font-size: .76rem; color: var(--muted); overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 2;
+}
+.approve-actions { display: flex; align-items: center; gap: .8rem; margin-top: .6rem; }
+@media (max-width: 700px) { .approve-summary { display: none; } }
+
+/* On a phone the table becomes a stack of cards: every cell full-width, the
+   header row gone (each cell is self-describing), actions at the end. A
+   horizontal scroll container was the other option and was rejected because
+   it clips the role menu popover. */
+@media (max-width: 700px) {
+  .people thead { display: none; }
+  .people, .people tbody, .people tr, .people td { display: block; width: 100%; }
+  .people tr {
+    border: 1px solid var(--line); border-radius: var(--r-container);
+    padding: .6rem .7rem; margin-bottom: .6rem;
+  }
+  .people td { border: none; padding: .15rem 0; }
+  .people td .seen { font-size: .75rem; color: var(--muted); }
+  .row-actions { justify-content: flex-start; margin-top: .4rem; }
+}
+
 @media (max-width: 760px) {
   .rolemenu-panel { right: auto; left: 0; }
 }
@@ -166,28 +190,27 @@ details.role-detail summary:hover { color: var(--ink); }
         <span class="req-when">first seen {{ u.created_at }}</span>
       </div>
 
-      {# A dropdown rather than a button per role. With three roles the buttons
-         were wider than the decision: an approver picks one, and a row of
-         cards invites reading four paragraphs to choose between three things.
-         The chosen role's own caution is shown BELOW the select, so the
-         consequence appears at the moment of choosing rather than in a panel
-         nobody opens. #}
+      {# Checkboxes, matching the role editor in the table below — roles
+         compose, and approval is the moment MOST grants are decided, so the
+         two surfaces must express the same thing. Each row shows the role's
+         one-line summary inline: the consequence is visible at the moment of
+         choosing, not in a panel nobody opens. #}
       <div class="role-pick">
-        <label class="label" for="role-{{ u.id }}">Role</label>
-        <select id="role-{{ u.id }}" data-rolepick="{{ u.id }}" data-email="{{ u.email }}">
-          {% for r in roles %}
-          <option value="{{ r.key }}"
-                  data-label="{{ r.label }}"
-                  data-summary="{{ r.summary }}"
-                  data-caution="{{ r.caution }}"
-                  data-count="{{ r.surfaces|length }}">
-            {{ r.label }} — {{ r.surfaces|length }} surface{{ '' if r.surfaces|length == 1 else 's' }}
-          </option>
-          {% endfor %}
-        </select>
-        <button class="primary" type="button"
-                data-approve="{{ u.id }}" data-email="{{ u.email }}">Approve</button>
-        <p class="role-why" data-why="{{ u.id }}"></p>
+        <span class="label">Roles</span>
+        {% for r in roles %}
+        <label class="rolemenu-row approve-row">
+          <input type="checkbox" data-approvebox="{{ u.id }}" value="{{ r.key }}"
+                 data-label="{{ r.label }}">
+          <span class="rolemenu-name">{{ r.label }}</span>
+          <span class="approve-summary">{{ r.summary }}</span>
+          <span class="rolemenu-count">{{ r.surfaces|length }}</span>
+        </label>
+        {% endfor %}
+        <div class="approve-actions">
+          <button class="primary" type="button"
+                  data-approve="{{ u.id }}" data-email="{{ u.email }}" disabled>Approve</button>
+          <p class="role-why" data-why="{{ u.id }}"></p>
+        </div>
       </div>
 
       <details class="role-detail">
@@ -223,7 +246,7 @@ details.role-detail summary:hover { color: var(--ink); }
     </thead>
     <tbody id="people">
       {% for u in users %}
-      <tr data-search="{{ u.email }} {{ u.grants|join(' ') }}">
+      <tr data-search="{{ u.email }} {{ u.roles|join(' ') }} {{ u.grants|join(' ') }}">
         <td><span class="email">{{ u.email }}</span></td>
         <td><span class="chip {{ u.status }}">{{ u.status }}</span></td>
         <td>
@@ -322,42 +345,44 @@ details.role-detail summary:hover { color: var(--ink); }
   /* Keep the consequence next to the control: changing the selection updates
      the description immediately, so an approver sees what they are granting
      before clicking rather than after. */
-  document.querySelectorAll('[data-rolepick]').forEach(function (sel) {
-    var why = document.querySelector('[data-why="' + sel.getAttribute('data-rolepick') + '"]');
-    function describe() {
-      var opt = sel.options[sel.selectedIndex];
-      if (!why || !opt) { return; }
-      var caution = opt.getAttribute('data-caution');
-      why.textContent = opt.getAttribute('data-summary') + (caution ? '  ' + caution : '');
-      why.className = 'role-why' + (caution ? ' caution' : '');
-    }
-    sel.addEventListener('change', describe);
-    describe();
-  });
-
   document.querySelectorAll('[data-approve]').forEach(function (btn) {
+    var userId = btn.getAttribute('data-approve');
+    var boxes = Array.prototype.slice.call(
+      document.querySelectorAll('[data-approvebox="' + userId + '"]'));
+    var why = document.querySelector('[data-why="' + userId + '"]');
+
+    function picked() { return boxes.filter(function (b) { return b.checked; }); }
+    function refresh() {
+      var names = picked().map(function (b) { return b.getAttribute('data-label'); });
+      btn.disabled = names.length === 0;
+      why.textContent = names.length
+        ? 'Will be able to use everything ' + names.join(' + ') + ' covers, immediately.'
+        : 'Pick at least one role to approve.';
+    }
+    boxes.forEach(function (b) { b.addEventListener('change', refresh); });
+    refresh();
+
     btn.addEventListener('click', function () {
-      var userId = btn.getAttribute('data-approve');
-      var sel = document.querySelector('[data-rolepick="' + userId + '"]');
-      var opt = sel.options[sel.selectedIndex];
-      var role = opt.value;
-      var label = opt.getAttribute('data-label');
+      var chosen = picked();
+      if (!chosen.length) { return; }
+      var keys = chosen.map(function (b) { return b.value; });
+      var names = chosen.map(function (b) { return b.getAttribute('data-label'); });
       var email = btn.getAttribute('data-email');
       /* Approving is the one action here that widens access, so it is the one
          that asks. Disable/decline are recoverable; a wrong grant is live. */
       window.confirmModal({
-        title: 'Grant the ' + label + ' role?',
-        body: email + ' will be able to use everything that role covers, '
+        title: 'Grant ' + names.join(' + ') + '?',
+        body: email + ' will be able to use everything those roles cover, '
             + 'immediately. You can change it afterwards.',
-        confirmLabel: 'Grant ' + label
+        confirmLabel: 'Approve'
       }).then(function (ok) {
         if (!ok) { return; }
         busy(btn, true);
-        post('/admin/users/' + userId + '/approve', { role: role })
+        post('/admin/users/' + userId + '/approve', { roles: keys })
           .then(function () { window.location.reload(); })
           .catch(function (e) {
             busy(btn, false);
-            window.alertModal({ title: 'Could not grant that role', body: e.message });
+            window.alertModal({ title: 'Could not approve', body: e.message });
           });
       });
     });

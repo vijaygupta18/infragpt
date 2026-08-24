@@ -914,7 +914,7 @@ details.spine:not([open]) > .spine-head { margin-bottom: 0; }
             window.renderMarkdown(text, streamEl);
           }, 150);
         }
-        turn.scrollIntoView({ block: 'end' });
+        if (nearBottom()) { turn.scrollIntoView({ block: 'end' }); }
       } else if (ev.type === 'token_reset') {
         /* Streaming failed and the backend is retrying without it. Drop what
            arrived so a partial answer never merges with the complete one. */
@@ -972,6 +972,15 @@ details.spine:not([open]) > .spine-head { margin-bottom: 0; }
      Gives up only after several consecutive failures to CONNECT — a stream
      that connects and later drops resets the counter, because progress was
      made. */
+  /* Follow the stream only while the reader is already at the bottom. A
+     forced scroll on every token yanks someone who scrolled up to read the
+     evidence back down — the most annoying possible behaviour at the exact
+     moment they are doing what the evidence spine exists for. */
+  function nearBottom() {
+    return (window.innerHeight + window.scrollY)
+        >= (document.body.scrollHeight - 160);
+  }
+
   function followRun(handle) {
     var failures = 0;
     function attempt() {
