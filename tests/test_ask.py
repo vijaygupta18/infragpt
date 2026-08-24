@@ -790,3 +790,54 @@ def test_duplicate_calls_in_one_round_run_once(env, key, monkeypatch) -> None:
                        headers=_headers(key[0], "eng@example.com")).json()
     assert len(seen) == 2, "the duplicate executed"
     assert len(data["calls"]) == 2
+
+
+def test_old_rounds_compact_and_recent_stay_verbatim(env, key, monkeypatch) -> None:
+    """Once evidence outgrows the threshold, earlier rounds are distilled and
+    the newest round rides along verbatim.
+
+    Blind truncation shrank every call's share evenly, so a thorough
+    investigation lost its decisive detail exactly when it got thorough.
+    The full call list must still reach the user untouched — compaction is
+    about what the MODEL sees, never about what the human is shown.
+    """
+    client, _ = env
+    _activate("eng@example.com", Surface.K8S_GCP)
+    monkeypatch.setattr(config, "COMPACT_EVIDENCE_CHARS", 500)
+
+    class TwoRounds(FakeGrid):
+        def __init__(self) -> None:
+            super().__init__(Selection(calls=[]))
+            self.round = 0
+            self.compacted: list[str] = []
+
+        async def select(self, question, tool_specs, context="", max_calls=200):  # noqa: ANN001,ANN201
+            self.round += 1
+            self.last_context = context
+            if self.round > 2:
+                return Selection(calls=[])
+            call = ToolCall("pod_status", {"service": f"svc-{self.round}", "cloud": "gcp"})
+            return Selection(calls=[call])
+
+        async def compact(self, evidence):  # noqa: ANN001,ANN201
+            self.compacted.append(evidence)
+            return "DIGEST: svc facts kept verbatim", Usage(2, 1)
+
+    fake = TwoRounds()
+    _install_grid(monkeypatch, fake)
+    _install_dispatch(
+        monkeypatch,
+        {"pod_status": ExecResult(ok=True, entry_name="pod_status", target="k8s_gcp",
+                                  text="x" * 800)},
+    )
+
+    data = client.post("/ask", json={"question": "sweep the pods"},
+                       headers=_headers(key[0], "eng@example.com")).json()
+
+    assert fake.compacted, "compaction never ran"
+    # The synthesiser saw the digest plus the recent round, not raw everything.
+    assert "DIGEST: svc facts kept verbatim" in fake.evidence
+    assert "RECENT CALLS, VERBATIM" in fake.evidence
+    # The user still gets every call in full.
+    assert len(data["calls"]) == 2
+    assert all(c["output"] for c in data["calls"])

@@ -469,6 +469,14 @@ CLI_TOKEN_TTL_HOURS = int(_env("CLI_TOKEN_TTL_HOURS", "12"))
 # call has its own timeout and row cap, the DB pool holds 5 connections so no
 # question can exhaust a reader, and the credentials cannot write.
 ANSWER_TIME_BUDGET_S = int(_env("INFRAGPT_ANSWER_TIME_BUDGET_S", "600"))
+
+# When the verbatim evidence gathered so far exceeds this, older rounds are
+# DISTILLED into a findings digest (cheap model) instead of being truncated
+# blindly. Truncation loses detail evenly across every call; distillation keeps
+# the identifiers, counts and errors and drops the table formatting — and the
+# most recent round always stays verbatim, because it is what the next
+# selection or the final answer will quote.
+COMPACT_EVIDENCE_CHARS = int(_env("INFRAGPT_COMPACT_EVIDENCE_CHARS", "40000"))
 # 0 = UNLIMITED, and that is the default for both.
 #
 # Same lesson as the daily token budget: a limit sized against a hypothetical

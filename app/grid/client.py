@@ -191,6 +191,47 @@ class GridClient:
 
     # ---- synthesis --------------------------------------------------------
 
+    async def compact(self, evidence: str) -> tuple[str, Usage]:
+        """Distil old evidence into findings, on the CHEAP model.
+
+        Used mid-investigation when the gathered evidence outgrows what can
+        ride along verbatim. The instruction is strict about what survives —
+        identifiers, numbers, error text — because a digest that paraphrases
+        away the pod name or rounds the count is worse than truncation: it
+        looks complete while being unquotable.
+        """
+        if not self.selector_model:
+            raise GridError("GRID_SELECTOR_MODEL is not configured")
+        payload = {
+            "model": self.selector_model,
+            "temperature": 0,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "Compress this tool evidence into a findings digest. "
+                        "RULES: one line per tool call, keep its function name; "
+                        "preserve identifiers, numbers, error messages and "
+                        "counts VERBATIM — never paraphrase or round them; keep "
+                        "every failure and every empty result explicitly (an "
+                        "empty result is a finding); drop repeated boilerplate "
+                        "and table formatting. Output only the digest."
+                    ),
+                },
+                {"role": "user", "content": evidence},
+            ],
+        }
+        body = await self._post(payload)
+        usage = self._usage(body)
+        try:
+            content = body["choices"][0]["message"].get("content") or ""
+        except (KeyError, IndexError) as exc:
+            raise GridError("gateway response missing choices[0].message") from exc
+        text = content.strip()
+        if not text:
+            raise GridError("compaction returned no content")
+        return text, usage
+
     async def synthesize(
         self,
         question: str,

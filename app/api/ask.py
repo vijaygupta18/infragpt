@@ -369,6 +369,55 @@ async def _answer(
     deadline = started + config.ANSWER_TIME_BUDGET_S
     out_of_time = False
     pending = _dedupe(list(selection.calls))
+
+    # Rolling compaction. A time-budgeted investigation can gather far more
+    # than rides along verbatim, and the old behaviour — shrinking every
+    # call's share evenly — loses the decisive detail at exactly the moment
+    # the investigation gets thorough. Instead, once the verbatim evidence
+    # outgrows the threshold, everything before the CURRENT round is distilled
+    # into a findings digest by the cheap model, and recent calls keep their
+    # full text. The full calls_out is untouched — the user's evidence spine,
+    # the audit log and the stored conversation always carry everything.
+    digest = ""
+    digest_upto = 0  # calls_out[:digest_upto] are represented by `digest`
+
+    def _working_evidence() -> str:
+        tail = _evidence(calls_out[digest_upto:])
+        if not digest:
+            return tail
+        head = (
+            "EARLIER EVIDENCE, COMPACTED (identifiers, counts and errors "
+            "preserved verbatim; full output is in the final answer's "
+            "evidence):\n" + digest
+        )
+        return head + "\n\n--- RECENT CALLS, VERBATIM ---\n" + tail
+
+    async def _maybe_compact(keep_from: int) -> None:
+        """Fold calls_out[digest_upto:keep_from] into the digest if oversized.
+
+        `keep_from` is the start of the newest round — the round that just ran
+        stays verbatim no matter what, because it is what the next selection
+        needs to quote. Failure to compact is never failure to answer: the
+        evidence renderer's per-call budget still bounds the total, so this
+        degrades to the old blind truncation rather than to an error.
+        """
+        nonlocal digest, digest_upto, usage
+        if keep_from <= digest_upto:
+            return
+        if len(_evidence(calls_out[digest_upto:])) < config.COMPACT_EVIDENCE_CHARS:
+            return
+        block = _evidence(calls_out[digest_upto:keep_from])
+        try:
+            new_digest, c_usage = await grid.compact(
+                (digest + "\n\n" if digest else "") + block
+            )
+        except GridError:
+            return
+        usage = usage + c_usage
+        digest = new_digest
+        digest_upto = keep_from
+        await _say("stage", stage="running",
+                   detail=f"compacted {keep_from} earlier result(s) to keep room")
     while pending:
         await _say("stage", stage="running",
                    detail=", ".join(c.name for c in pending))
@@ -387,12 +436,13 @@ async def _answer(
         # Give the selector what came back and let it ask for follow-ups. It
         # returns nothing when the question is already answered, which is the
         # common case and costs one cheap call.
+        await _maybe_compact(keep_from=before)
         try:
             follow = await grid.select(
                 question,
                 tool_specs,
                 context=(
-                    f"{selector_context}\n\nAlready gathered:\n{_evidence(calls_out)}\n\n"
+                    f"{selector_context}\n\nAlready gathered:\n{_working_evidence()}\n\n"
                     "If this fully answers the question, call nothing.\n"
                     "Otherwise CONTINUE THE INVESTIGATION rather than restating it. "
                     "If the results above gave you identifiers you did not have "
@@ -441,7 +491,7 @@ async def _answer(
                     await _say("token", text=piece)
 
                 answer, synth_usage = await grid.synthesize_stream(
-                    question, _evidence(calls_out),
+                    question, _working_evidence(),
                     context=selector_context, on_token=_token,
                 )
             except Exception:  # noqa: BLE001
@@ -452,11 +502,11 @@ async def _answer(
                 # at all, the non-streaming call raises and the user is told.
                 await _say("token_reset")
                 answer, synth_usage = await grid.synthesize(
-                    question, _evidence(calls_out), context=selector_context
+                    question, _working_evidence(), context=selector_context
                 )
         else:
             answer, synth_usage = await grid.synthesize(
-                question, _evidence(calls_out), context=selector_context
+                question, _working_evidence(), context=selector_context
             )
     except GridError as exc:
         raise _fail(f"synthesis failed: {exc}") from exc
