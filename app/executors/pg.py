@@ -331,7 +331,15 @@ class PgExecutor(Executor):
         started = self._timed()
         pool = await self._pool(target)
         try:
-            async with pool.connection() as conn:
+            # Acquire with a SHORT timeout, separately from the query. The
+            # default acquire timeout equals the statement timeout, so during a
+            # parallel burst the queued call ate its whole 30s budget waiting
+            # for a slot and then failed — measured live: every one of these
+            # queries is sub-second alone, and every audited 30s failure was
+            # the wait, not the work. Ten seconds is dozens of query-lengths of
+            # queueing; not getting a slot by then IS the finding, and saying
+            # so after 10s beats a misleading timeout after 30.
+            async with pool.connection(timeout=min(10.0, float(entry.timeout_s))) as conn:
                 await self._prepare_session(conn, entry.timeout_s)
                 for name in identifiers:
                     await self._assert_relation_exists(conn, str(params[name]))
@@ -370,10 +378,13 @@ class PgExecutor(Executor):
                 if real:
                     raise ExecutorError(f"{entry.name}: {real}") from exc
                 raise ExecutorError(
-                    f"{entry.name}: host is reachable but no connection became "
-                    f"available within the pool timeout on {target}, and a direct "
-                    "connection then succeeded — so the pool is saturated rather "
-                    "than misconfigured. The reader may be at its connection ceiling."
+                    f"{entry.name}: all pooled connections to {target} were busy "
+                    "for 10s, and a direct connection then succeeded — which "
+                    "PROVES the database is accepting connections and is NOT at "
+                    "its ceiling. THIS TOOL's own pool (capped small on purpose) "
+                    "was saturated by other calls in this question. Re-run the "
+                    "call alone; do not report database connection exhaustion "
+                    "on this evidence."
                 ) from exc
             raise ExecutorError(f"{entry.name}: {type(exc).__name__}: {exc}") from exc
 

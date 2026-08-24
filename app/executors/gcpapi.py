@@ -16,6 +16,7 @@ the credential remains the real enforcement, as everywhere else in this system.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import time
@@ -252,21 +253,34 @@ class GcpAlloyDbExecutor(Executor):
         url = f"{conn.base_url}/{parent}/clusters/-/instances"
         listing = await _get(url, None, entry.timeout_s)
 
+        # The FULL gets are the expensive part — the admin API takes seconds
+        # per instance — and they are independent, so they run CONCURRENTLY.
+        # Serial, this function took 15-36s on every call (measured from the
+        # audit log); the wait is now one slow get, not their sum.
+        instances = listing.get("instances", [])
+
+        async def _full(inst: dict[str, Any]) -> dict[str, Any]:
+            name = inst.get("name", "")
+            if inst.get("instanceType") != "READ_POOL" or not name:
+                return {}
+            try:
+                return await _get(
+                    f"{conn.base_url}/{name}",
+                    {"view": "INSTANCE_VIEW_FULL"},
+                    entry.timeout_s,
+                )
+            except ExecutorError:
+                return {}
+
+        fulls = await asyncio.gather(*(_full(i) for i in instances))
+
         rows: list[dict[str, Any]] = []
-        for inst in listing.get("instances", []):
+        for inst, full in zip(instances, fulls, strict=True):
             name = inst.get("name", "")
             cluster = name.split("/clusters/")[-1].split("/")[0] if "/clusters/" in name else "?"
             pool = inst.get("readPoolConfig") or {}
             live_nodes = None
             if inst.get("instanceType") == "READ_POOL" and name:
-                try:
-                    full = await _get(
-                        f"{conn.base_url}/{name}",
-                        {"view": "INSTANCE_VIEW_FULL"},
-                        entry.timeout_s,
-                    )
-                except ExecutorError:
-                    full = {}
                 live_nodes = len(full.get("nodes") or []) or None
                 pool = full.get("readPoolConfig") or pool
             autoscale = (pool.get("autoScalingConfig") or {}).get("policy") or {}
@@ -382,3 +396,152 @@ class GcpMetricQueryExecutor(GcpMetricExecutor):
         if aligner:
             result.text = (result.text + f"\n[aligner: {aligner}]").strip()
         return result
+
+
+class GcpComputeExecutor(Executor):
+    """Typed reads against the Compute and Container APIs.
+
+    These existed only through `run_read_command` composing gcloud — which
+    works, but a reviewed entry with typed params beats a model-authored
+    command: it cannot get a flag wrong, its output shape is stable, and it is
+    offered to the selector by name, so "which subnets exist" no longer depends
+    on the model remembering gcloud syntax.
+
+    Aggregated-list responses arrive grouped by scope ("zones/us-central1-a":
+    {...}); the executor flattens them because the model reasons over rows, not
+    over Google's pagination envelope. `warning` blocks (empty scopes) are
+    dropped — an empty zone is not a fact anyone asked for.
+    """
+
+    kind = "gcpcompute"
+
+    #: operation -> (connection, path template, response list key)
+    OPS: dict[str, tuple[str, str, str]] = {
+        "instances": ("gcp_compute", "/projects/{project}/aggregated/instances", "instances"),
+        "subnetworks": ("gcp_compute", "/projects/{project}/aggregated/subnetworks", "subnetworks"),
+        "addresses": ("gcp_compute", "/projects/{project}/aggregated/addresses", "addresses"),
+        "firewalls": ("gcp_compute", "/projects/{project}/global/firewalls", "items"),
+        "nodepools": (
+            "gcp_container",
+            "/projects/{project}/locations/-/clusters",
+            "clusters",
+        ),
+    }
+
+    async def run(
+        self, entry: RegistryEntry, params: dict[str, Any], target: str
+    ) -> ExecResult:
+        started = self._timed()
+        op = entry.metric or ""
+        if op not in self.OPS:
+            raise ExecutorError(f"{entry.name}: unknown compute operation '{op}'")
+        conn_name, path, list_key = self.OPS[op]
+        conn = config.GCP_CONNECTIONS[conn_name]
+        if not conn.project:
+            raise ExecutorError("GCP_PROJECT is not configured")
+
+        url = conn.base_url + path.format(project=conn.project)
+        body = await _get(url, {"maxResults": 500}, entry.timeout_s)
+
+        if op == "nodepools":
+            rows = self._nodepool_rows(body)
+        elif "/aggregated/" in path:
+            rows = self._flatten_aggregated(body, list_key)
+        else:
+            rows = list(body.get(list_key) or [])
+        rows = [self._trim(op, r) for r in rows]
+
+        needle = str(params.get("name") or "").strip().lower()
+        if needle:
+            rows = [r for r in rows if needle in str(r.get("name", "")).lower()]
+
+        return ExecResult(
+            ok=True,
+            entry_name=entry.name,
+            target=target,
+            rows=rows[: entry.row_limit],
+            truncated=len(rows) > entry.row_limit,
+            duration_ms=int((self._timed() - started) * 1000),
+        )
+
+    @staticmethod
+    def _flatten_aggregated(body: dict[str, Any], list_key: str) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for scope, block in (body.get("items") or {}).items():
+            for item in block.get(list_key) or []:
+                item["_scope"] = scope.split("/")[-1]
+                rows.append(item)
+        return rows
+
+    @staticmethod
+    def _nodepool_rows(body: dict[str, Any]) -> list[dict[str, Any]]:
+        rows = []
+        for cluster in body.get("clusters") or []:
+            for np in cluster.get("nodePools") or []:
+                auto = np.get("autoscaling") or {}
+                rows.append(
+                    {
+                        "name": np.get("name"),
+                        "cluster": cluster.get("name"),
+                        "status": np.get("status"),
+                        "machine_type": (np.get("config") or {}).get("machineType"),
+                        "spot": bool((np.get("config") or {}).get("spot")),
+                        "node_count": np.get("initialNodeCount"),
+                        "autoscaling_min": auto.get("minNodeCount"),
+                        "autoscaling_max": auto.get("maxNodeCount"),
+                        "version": np.get("version"),
+                    }
+                )
+        return rows
+
+    @staticmethod
+    def _trim(op: str, item: dict[str, Any]) -> dict[str, Any]:
+        """Keep the fields a debugging answer actually uses.
+
+        The raw resources run to hundreds of keys (fingerprints, self-links,
+        kind markers). Passing them through verbatim buries the four facts
+        that matter under provenance noise and burns the evidence budget.
+        """
+        if op == "instances":
+            nics = item.get("networkInterfaces") or [{}]
+            return {
+                "name": item.get("name"),
+                "zone": item.get("_scope"),
+                "status": item.get("status"),
+                "machine_type": str(item.get("machineType", "")).rsplit("/", 1)[-1],
+                "internal_ip": nics[0].get("networkIP"),
+                "external_ip": (nics[0].get("accessConfigs") or [{}])[0].get("natIP"),
+            }
+        if op == "subnetworks":
+            return {
+                "name": item.get("name"),
+                "region": item.get("_scope"),
+                "cidr": item.get("ipCidrRange"),
+                "network": str(item.get("network", "")).rsplit("/", 1)[-1],
+                "secondary_ranges": [
+                    f"{r.get('rangeName')}={r.get('ipCidrRange')}"
+                    for r in item.get("secondaryIpRanges") or []
+                ],
+            }
+        if op == "addresses":
+            return {
+                "name": item.get("name"),
+                "scope": item.get("_scope"),
+                "address": item.get("address"),
+                "status": item.get("status"),
+                "type": item.get("addressType"),
+                "used_by": [str(u).rsplit("/", 1)[-1] for u in item.get("users") or []],
+            }
+        if op == "firewalls":
+            return {
+                "name": item.get("name"),
+                "direction": item.get("direction"),
+                "network": str(item.get("network", "")).rsplit("/", 1)[-1],
+                "sources": item.get("sourceRanges"),
+                "allowed": [
+                    f"{a.get('IPProtocol')}:{','.join(a.get('ports') or ['*'])}"
+                    for a in item.get("allowed") or []
+                ],
+                "disabled": item.get("disabled", False),
+            }
+        return item

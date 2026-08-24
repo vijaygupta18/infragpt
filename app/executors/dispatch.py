@@ -26,6 +26,7 @@ from app.executors.clickhouse import ClickHouseExecutor
 from app.executors.code import CodeExecutor
 from app.executors.gcpapi import (
     GcpAlloyDbExecutor,
+    GcpComputeExecutor,
     GcpMetricExecutor,
     GcpMetricQueryExecutor,
     GcpMetricSearchExecutor,
@@ -68,6 +69,7 @@ class ExecutorRegistry:
             "code": CodeExecutor(),
             "gcpmetric": GcpMetricExecutor(),
             "gcpalloydb": GcpAlloyDbExecutor(),
+            "gcpcompute": GcpComputeExecutor(),
             "gcpmetricsearch": GcpMetricSearchExecutor(),
             "gcpmetricquery": GcpMetricQueryExecutor(),
             "awsmetric": AwsMetricExecutor(),
@@ -190,6 +192,15 @@ async def dispatch(
     except KeyError as exc:
         return _failure(name, "", str(exc))
 
+    # Reserved filter params come out BEFORE validation. They used to be
+    # popped after it, which made the feature dead on arrival: validation
+    # rejects unknown params, so any entry that had not declared `grep` bounced
+    # the call with "unknown params: ['grep']" and the pop below never ran.
+    # Three audited failures were exactly this — the model reasonably assuming
+    # the filter works everywhere, because it is documented to.
+    needle = params.pop(GREP_PARAM, None)
+    context = params.pop(GREP_CONTEXT_PARAM, None) or 0
+
     try:
         validated = entry.validate_params(params)
     except ParamValidationError as exc:
@@ -229,11 +240,6 @@ async def dispatch(
         target = resolve_target(entry, validated)
     except Exception as exc:  # noqa: BLE001 - surfaced, never hidden
         return _failure(entry.name, entry.target, str(exc))
-
-    # Reserved filter params never reach an executor: they describe what to do
-    # with output, not what to run.
-    needle = validated.pop(GREP_PARAM, None)
-    context = validated.pop(GREP_CONTEXT_PARAM, None) or 0
 
     try:
         executor = executors.for_kind(entry.kind)

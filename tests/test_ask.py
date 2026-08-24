@@ -112,6 +112,10 @@ def env(tmp_path, monkeypatch, key):
     # The Limits singleton binds a database on first use; without this reset it
     # leaks rate-limit counters (and a stale db handle) between tests.
     reset_limits(None)
+    # Same leak, same cure: the case-file singleton binds the first database it
+    # sees and would carry one test's memory into the next.
+    from app.casefiles import reset_casefiles
+    reset_casefiles()
 
     with TestClient(create_app()) as client:
         yield client, tmp_path
@@ -765,3 +769,24 @@ def test_within_budget_the_loop_is_not_capped_by_a_count(env, key, monkeypatch) 
                        headers=_headers(key[0], "eng@example.com")).json()
     assert len(data["calls"]) == 40, "a count limit is back"
     assert "PARTIAL" not in getattr(fake, "synth_context", "")
+
+
+def test_duplicate_calls_in_one_round_run_once(env, key, monkeypatch) -> None:
+    """The model does emit the same call twice in one response — observed live
+    with paired ch_query calls. Running both spends a backend read to learn
+    nothing and shows duplicate rows in the UI."""
+    client, _ = env
+    _activate("eng@example.com", Surface.K8S_GCP)
+    dup = ToolCall("pod_status", {"service": "x", "cloud": "gcp"})
+    other = ToolCall("pod_status", {"service": "y", "cloud": "gcp"})
+    fake = FakeGrid(Selection(calls=[dup, dup, other]))
+    _install_grid(monkeypatch, fake)
+    seen = _install_dispatch(
+        monkeypatch,
+        {"pod_status": ExecResult(ok=True, entry_name="pod_status", target="k8s_gcp",
+                                  text="ok")},
+    )
+    data = client.post("/ask", json={"question": "pods?"},
+                       headers=_headers(key[0], "eng@example.com")).json()
+    assert len(seen) == 2, "the duplicate executed"
+    assert len(data["calls"]) == 2

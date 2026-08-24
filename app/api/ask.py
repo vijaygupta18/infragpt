@@ -28,6 +28,7 @@ from pydantic import BaseModel, Field
 
 from app import audit, config, experience
 from app.auth.deps import Principal, current_user
+from app.casefiles import get_casefiles
 from app.executors.dispatch import dispatch
 from app.grid.client import GridError, get_grid_client
 from app.limits.deps import check_token_budget, enforce_question_rate, record_question_tokens
@@ -279,12 +280,22 @@ async def _answer(
     except Exception:  # noqa: BLE001 - never let the learning layer break a question
         learned = ""
 
+    # What past investigations found — the tool's own memory. Context, never
+    # fact: every retrieval carries its date and a re-verify warning, because
+    # a stale conclusion presented as current state is the confident-wrong
+    # answer this whole design exists to avoid.
+    try:
+        cases = get_casefiles().context_for(question)
+    except Exception:  # noqa: BLE001 - memory must never break a question
+        cases = ""
+
     selector_context = "\n\n".join(
         part
         for part in (
             f"Earlier in this conversation:\n{history}" if history else "",
             runbook_context,
             learned,
+            cases,
         )
         if part
     )
@@ -336,10 +347,28 @@ async def _answer(
         )
         return AskResponse(conversation_id=conv.id, answer=answer, calls=[])
 
+    def _dedupe(calls: list[Any]) -> list[Any]:
+        """Drop exact repeats WITHIN one round, keeping first occurrence.
+
+        The cross-round filter already exists; this closes the other gap. The
+        model does emit the same call twice in one response — observed live
+        with paired ch_query calls — and running both spends a backend read to
+        learn nothing, while the UI shows duplicate rows that read as a bug.
+        """
+        seen: set[tuple[str, str]] = set()
+        out = []
+        for c in calls:
+            key = (c.name, json.dumps(c.arguments, sort_keys=True, default=str))
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(c)
+        return out
+
     calls_out: list[ToolCallOut] = []
     deadline = started + config.ANSWER_TIME_BUDGET_S
     out_of_time = False
-    pending = list(selection.calls)
+    pending = _dedupe(list(selection.calls))
     while pending:
         await _say("stage", stage="running",
                    detail=", ".join(c.name for c in pending))
@@ -378,9 +407,9 @@ async def _answer(
             break  # a failed follow-up must not lose the answer we already have
         usage = usage + follow.usage
         already = {(c.entry_name, str(c.params)) for c in calls_out}
-        pending = [
-            c for c in follow.calls if (c.name, str(c.arguments)) not in already
-        ]
+        pending = _dedupe(
+            [c for c in follow.calls if (c.name, str(c.arguments)) not in already]
+        )
 
     if out_of_time:
         elapsed = int(time.monotonic() - started)
@@ -436,6 +465,18 @@ async def _answer(
     storage.conversations.add_message(
         conv.id, "assistant", answer, evidence=_evidence_json(calls_out)
     )
+    # Remember what this investigation found, so the next similar question
+    # starts from it instead of from scratch. Only successful CALLS count as
+    # provenance — an answer with no evidence behind it is not a precedent.
+    try:
+        get_casefiles().record(
+            user_email=email,
+            question=question,
+            answer=answer,
+            functions=[c.entry_name for c in calls_out if c.ok],
+        )
+    except Exception:  # noqa: BLE001, S110 - memory must never break a question
+        pass
     audit.audit_question(
         user_email=email,
         conversation_id=conv.id,
