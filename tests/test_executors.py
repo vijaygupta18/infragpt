@@ -799,3 +799,47 @@ def test_ordinary_errors_are_left_readable() -> None:
     from app.executors.base import safe_exception_text
 
     assert "connection refused" in safe_exception_text(OSError("connection refused"))
+
+
+@pytest.mark.anyio
+async def test_cache_serves_within_ttl_and_marks_age(monkeypatch):
+    """A cached inventory is served instantly, marked with its age, and a
+    'right now' entry (ttl 0) is never cached.
+
+    The marker is the correctness half: a cached result presented as a live
+    read would let the model claim 'currently X nodes' from minute-old data.
+    """
+    from app.executors.base import ExecResult
+    from app.executors.dispatch import dispatch, reset_result_cache
+
+    reset_result_cache()
+    calls = {"n": 0}
+
+    class FakeExec:
+        kind = "gcpcompute"
+
+        async def run(self, entry, params, target):  # noqa: ANN001, ANN202
+            calls["n"] += 1
+            return ExecResult(ok=True, entry_name=entry.name, target=target,
+                              rows=[{"a": 1}], text="live")
+
+    class FakeExecs:
+        def for_kind(self, kind):  # noqa: ANN001, ANN202
+            return FakeExec()
+
+    from pathlib import Path
+
+    from app.registry.loader import get_registry
+    reg = get_registry(Path(__file__).parent.parent / "registry", reload=True)
+
+    r1 = await dispatch("gcp_instances", {}, registry=reg, executors=FakeExecs())
+    r2 = await dispatch("gcp_instances", {}, registry=reg, executors=FakeExecs())
+    assert calls["n"] == 1, "second call should be a cache hit"
+    assert "served from cache" in (r2.text or "")
+    assert "served from cache" not in (r1.text or "")
+
+    # different params = different identity
+    await dispatch("gcp_instances", {"name": "click"}, registry=reg, executors=FakeExecs())
+    assert calls["n"] == 2
+
+    reset_result_cache()

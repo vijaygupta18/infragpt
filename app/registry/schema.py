@@ -229,6 +229,11 @@ class RegistryEntry(BaseModel):
 
     row_limit: int = 100
     timeout_s: int = 20
+    #: Successful results may be served from memory for this many seconds.
+    #: 0 (the default) means never — only slow INVENTORY reads opt in, where
+    #: the data changes over minutes and the call costs seconds. Anything that
+    #: answers "right now" questions (connections, queries, pods) must stay 0.
+    cache_ttl_s: int = 0
 
     @field_validator("name")
     @classmethod

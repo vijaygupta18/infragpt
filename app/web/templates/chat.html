@@ -228,7 +228,7 @@ details.spine:not([open]) > .spine-head { margin-bottom: 0; }
 
 /* While streaming, the text is plain and gets a soft caret so it reads as
    still-arriving rather than finished-and-badly-formatted. */
-.answer.streaming { white-space: pre-wrap; }
+/* Rendered markdown while streaming — no pre-wrap, the renderer owns layout. */
 .answer.streaming::after {
   content: ""; display: inline-block; width: .45rem; height: 1em;
   margin-left: .12rem; vertical-align: text-bottom;
@@ -881,6 +881,8 @@ details.spine:not([open]) > .spine-head { margin-bottom: 0; }
         } else {
           openStage = activity.step(STAGE_TEXT[ev.stage] || ev.stage, ev.detail || '');
         }
+      } else if (ev.type === 'notice') {
+        activity.step(ev.text, '', 'done');
       } else if (ev.type === 'call_start') {
         activity.callStart(ev);
       } else if (ev.type === 'call') {
@@ -897,7 +899,21 @@ details.spine:not([open]) > .spine-head { margin-bottom: 0; }
           turn.appendChild(streamEl);
         }
         streamText += ev.text;
-        streamEl.textContent = streamText;
+        /* Markdown is rendered LIVE, throttled to ~7 fps. Re-rendering per
+           token is wasted layout work; plain text until the end made tables
+           and code arrive as a wall of pipes and backticks. The one genuine
+           mid-stream hazard is an unclosed code fence swallowing the rest of
+           the text as code — so an odd fence count gets a temporary close. */
+        if (!streamEl._t) {
+          streamEl._t = setTimeout(function () {
+            streamEl._t = null;
+            var text = streamText;
+            var fences = (text.match(/```/g) || []).length;
+            if (fences % 2 === 1) { text += '\n```'; }
+            streamEl.textContent = '';
+            window.renderMarkdown(text, streamEl);
+          }, 150);
+        }
         turn.scrollIntoView({ block: 'end' });
       } else if (ev.type === 'token_reset') {
         /* Streaming failed and the backend is retrying without it. Drop what
@@ -924,6 +940,7 @@ details.spine:not([open]) > .spine-head { margin-bottom: 0; }
         else { turn.appendChild(spine); }
 
         var answer = streamEl || el('div', 'answer md');
+        if (answer._t) { clearTimeout(answer._t); answer._t = null; }
         answer.classList.remove('streaming');
         answer.textContent = '';
         window.renderMarkdown(ev.answer, answer);

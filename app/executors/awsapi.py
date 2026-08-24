@@ -195,6 +195,20 @@ def aws_get_json(service: str, region: str, path: str, timeout_s: int = 15) -> d
     return response.json()
 
 
+#: Keepalive client shared by every AWS call — a client per call paid TCP+TLS
+#: setup to amazonaws.com on each read.
+_client: httpx.AsyncClient | None = None
+
+
+def _shared_client() -> httpx.AsyncClient:
+    global _client  # noqa: PLW0603
+    if _client is None or _client.is_closed:
+        _client = httpx.AsyncClient(
+            limits=httpx.Limits(max_keepalive_connections=10, max_connections=20)
+        )
+    return _client
+
+
 def _signed_headers(
     service: str, region: str, host: str, body: str
 ) -> dict[str, str]:
@@ -251,8 +265,9 @@ async def _post(service: str, region: str, params: dict[str, str], timeout_s: in
     body = urllib.parse.urlencode(sorted(params.items()))
     headers = _signed_headers(service, region, host, body)
     try:
-        async with httpx.AsyncClient(timeout=timeout_s) as client:
-            resp = await client.post(f"https://{host}/", content=body, headers=headers)
+        resp = await _shared_client().post(
+            f"https://{host}/", content=body, headers=headers, timeout=timeout_s
+        )
     except httpx.HTTPError as exc:
         raise ExecutorError(f"AWS API unreachable: {exc}") from exc
     if resp.status_code == 403:

@@ -148,6 +148,7 @@ entries:
     params: {}
     row_limit: 50
     timeout_s: 25
+    cache_ttl_s: 60
 
   - name: alloydb_disk_usage
     surface: cloud:gcp
@@ -393,6 +394,7 @@ entries:
         description: Case-insensitive substring filter on the instance name.
     row_limit: 100
     timeout_s: 25
+    cache_ttl_s: 60
 
   - name: gcp_subnets
     surface: cloud:gcp
@@ -410,6 +412,7 @@ entries:
         description: Case-insensitive substring filter on the subnet name.
     row_limit: 100
     timeout_s: 25
+    cache_ttl_s: 60
 
   - name: gcp_addresses
     surface: cloud:gcp
@@ -427,6 +430,7 @@ entries:
         description: Case-insensitive substring filter on the address name.
     row_limit: 100
     timeout_s: 25
+    cache_ttl_s: 60
 
   - name: gcp_firewalls
     surface: cloud:gcp
@@ -446,6 +450,7 @@ entries:
         description: Case-insensitive substring filter on the rule name.
     row_limit: 150
     timeout_s: 25
+    cache_ttl_s: 60
 
   - name: gke_nodepools
     surface: cloud:gcp
@@ -460,3 +465,4 @@ entries:
     params: {}
     row_limit: 100
     timeout_s: 25
+    cache_ttl_s: 60

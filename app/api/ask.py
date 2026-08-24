@@ -288,6 +288,15 @@ async def _answer(
         cases = get_casefiles().context_for(question)
     except Exception:  # noqa: BLE001 - memory must never break a question
         cases = ""
+    if cases:
+        # Tell the user their past work is being reused — memory that operates
+        # silently reads as the tool being spookily right, which is worse than
+        # it being visibly informed.
+        await _say(
+            "notice",
+            text=f"Recalled {cases.count('] Q:')} similar past "
+                 "investigation(s) from memory",
+        )
 
     selector_context = "\n\n".join(
         part

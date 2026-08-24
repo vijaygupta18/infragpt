@@ -91,10 +91,15 @@ class GcpInsightsExecutor(Executor):
         started = self._timed()
         url = f"{_BASE}/{config.GCP_PROJECT}/timeSeries?{urllib.parse.urlencode(query)}"
         try:
-            async with httpx.AsyncClient(timeout=entry.timeout_s) as client:
-                response = await client.get(
-                    url, headers={"Authorization": f"Bearer {_token()}"}
-                )
+            from app.executors.gcpapi import _shared_client
+
+            # Same shared, keepalive client as every other GCP call — a client
+            # per call pays TLS setup on every read.
+            response = await _shared_client().get(
+                url,
+                headers={"Authorization": f"Bearer {_token()}"},
+                timeout=entry.timeout_s,
+            )
         except httpx.HTTPError as exc:
             raise ExecutorError(f"{entry.name}: monitoring API unreachable: {exc}") from exc
         if response.status_code >= 400:

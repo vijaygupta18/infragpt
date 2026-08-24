@@ -80,6 +80,23 @@ class GridClient:
         self.synth_model = synth_model or config.GRID_SYNTH_MODEL
         self.timeout_s = timeout_s
 
+    def _client(self) -> httpx.AsyncClient:
+        """One keepalive client per GridClient, lazily created.
+
+        A client per request paid TCP + TLS setup on EVERY model call — and a
+        question makes several: each selection round, the synthesis, and any
+        compaction. The gateway timeout stays on the client; it applied
+        per-request before and still does.
+        """
+        client = getattr(self, "_http", None)
+        if client is None or client.is_closed:
+            client = httpx.AsyncClient(
+                timeout=self.timeout_s,
+                limits=httpx.Limits(max_keepalive_connections=5, max_connections=10),
+            )
+            self._http = client
+        return client
+
     async def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
         url = f"{self.base_url}/v1/chat/completions"
         headers = {
@@ -87,8 +104,7 @@ class GridClient:
             "Content-Type": "application/json",
         }
         try:
-            async with httpx.AsyncClient(timeout=self.timeout_s) as client:
-                resp = await client.post(url, json=payload, headers=headers)
+            resp = await self._client().post(url, json=payload, headers=headers)
         except httpx.TimeoutException as exc:
             # str(ReadTimeout) is EMPTY, so "gateway unreachable: " with nothing
             # after it was the entire message — which reads as a network problem
@@ -319,35 +335,34 @@ class GridClient:
         parts: list[str] = []
         usage = Usage(0, 0)
         try:
-            async with httpx.AsyncClient(timeout=self.timeout_s) as client:
-                async with client.stream(
-                    "POST", url, json=payload, headers=headers
-                ) as resp:
-                    if resp.status_code >= 400:
-                        await resp.aread()
-                        raise GridError(
-                            f"gateway returned {resp.status_code}: {resp.text[:400]}"
-                        )
-                    async for line in resp.aiter_lines():
-                        if not line.startswith("data:"):
-                            continue
-                        data = line[5:].strip()
-                        if not data or data == "[DONE]":
-                            continue
-                        try:
-                            chunk = json.loads(data)
-                        except ValueError:
-                            # One malformed chunk must not discard an answer
-                            # that is otherwise arriving fine.
-                            continue
-                        if chunk.get("usage"):
-                            usage = self._usage(chunk)
-                        for choice in chunk.get("choices") or []:
-                            piece = (choice.get("delta") or {}).get("content") or ""
-                            if piece:
-                                parts.append(piece)
-                                if on_token is not None:
-                                    await on_token(piece)
+            async with self._client().stream(
+                "POST", url, json=payload, headers=headers
+            ) as resp:
+                if resp.status_code >= 400:
+                    await resp.aread()
+                    raise GridError(
+                        f"gateway returned {resp.status_code}: {resp.text[:400]}"
+                    )
+                async for line in resp.aiter_lines():
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if not data or data == "[DONE]":
+                        continue
+                    try:
+                        chunk = json.loads(data)
+                    except ValueError:
+                        # One malformed chunk must not discard an answer
+                        # that is otherwise arriving fine.
+                        continue
+                    if chunk.get("usage"):
+                        usage = self._usage(chunk)
+                    for choice in chunk.get("choices") or []:
+                        piece = (choice.get("delta") or {}).get("content") or ""
+                        if piece:
+                            parts.append(piece)
+                            if on_token is not None:
+                                await on_token(piece)
         except httpx.TimeoutException as exc:
             raise GridError(
                 f"gateway timed out after {self.timeout_s:.0f}s while writing "

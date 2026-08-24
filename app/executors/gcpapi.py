@@ -103,14 +103,30 @@ def _conn(target: str) -> config.GcpApiConnection:
         raise ExecutorError(f"unknown gcp connection: {target}") from None
 
 
+#: One client for every GCP API call, with keepalive. A client per call paid
+#: TCP + TLS setup to googleapis.com on EVERY read — hundreds of ms that are
+#: pure overhead, multiplied by however many calls an investigation makes.
+#: The timeout stays per-request; only the connections are shared.
+_client: httpx.AsyncClient | None = None
+
+
+def _shared_client() -> httpx.AsyncClient:
+    global _client  # noqa: PLW0603
+    if _client is None or _client.is_closed:
+        _client = httpx.AsyncClient(
+            limits=httpx.Limits(max_keepalive_connections=10, max_connections=20)
+        )
+    return _client
+
+
 async def _get(url: str, params: dict[str, Any] | None, timeout_s: int) -> dict[str, Any]:
     try:
-        async with httpx.AsyncClient(timeout=timeout_s) as client:
-            resp = await client.get(
-                url,
-                params=params,
-                headers={"Authorization": f"Bearer {_token()}"},
-            )
+        resp = await _shared_client().get(
+            url,
+            params=params,
+            headers={"Authorization": f"Bearer {_token()}"},
+            timeout=timeout_s,
+        )
     except httpx.HTTPError as exc:
         raise ExecutorError(f"GCP API unreachable: {exc}") from exc
     if resp.status_code == 401:

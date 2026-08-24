@@ -165,6 +165,24 @@ def apply_grep(result: ExecResult, needle: str, context: int = 0) -> ExecResult:
     return result
 
 
+#: Result cache for entries that opt in via `cache_ttl_s`. Keyed by the full
+#: call identity; only SUCCESSFUL results are stored, and every hit is marked
+#: in the evidence with its age, so the model can say "as of Ns ago" instead of
+#: presenting a cached inventory as a live read. Bounded: expired entries are
+#: swept on each store, and inventories are small.
+_result_cache: dict[tuple[str, str, str], tuple[float, ExecResult]] = {}
+
+
+def _cache_key(entry: RegistryEntry, params: dict[str, Any], target: str) -> tuple[str, str, str]:
+    import json as _json
+
+    return (entry.name, _json.dumps(params, sort_keys=True, default=str), target)
+
+
+def reset_result_cache() -> None:
+    _result_cache.clear()
+
+
 async def dispatch(
     name: str,
     params: dict[str, Any] | None = None,
@@ -241,9 +259,43 @@ async def dispatch(
     except Exception as exc:  # noqa: BLE001 - surfaced, never hidden
         return _failure(entry.name, entry.target, str(exc))
 
+    import time as _time
+
+    # A hit is REBUILT and then flows through the same grep/cap/redact tail as
+    # a live result — never returned early. "Every result is redacted" must be
+    # a property of the code path, not of the data happening to be clean.
+    cache_key = _cache_key(entry, validated, target) if entry.cache_ttl_s else None
+    served_from_cache = False
+    if cache_key is not None:
+        hit = _result_cache.get(cache_key)
+        if hit is not None and _time.monotonic() - hit[0] < entry.cache_ttl_s:
+            age = int(_time.monotonic() - hit[0])
+            cached = hit[1]
+            result = ExecResult(
+                ok=True,
+                entry_name=cached.entry_name,
+                target=cached.target,
+                rows=list(cached.rows or []),
+                text=(cached.text or "")
+                + f"\n[served from cache, {age}s old — treat as 'as of {age}s ago']",
+                truncated=cached.truncated,
+                duration_ms=0,
+            )
+            served_from_cache = True
+
     try:
-        executor = executors.for_kind(entry.kind)
-        result = await executor.run(entry, validated, target)
+        if not served_from_cache:
+            executor = executors.for_kind(entry.kind)
+            result = await executor.run(entry, validated, target)
+            if cache_key is not None and result.ok:
+                now = _time.monotonic()
+                for k, (ts, _r) in list(_result_cache.items()):
+                    if now - ts > 300:
+                        _result_cache.pop(k, None)
+                # Stored BEFORE grep and redaction so a later hit with a
+                # different grep filters the full result; the hit is redacted
+                # on its own way out, every time.
+                _result_cache[cache_key] = (now, result)
         if needle:
             result = apply_grep(result, str(needle), int(context))
     except ExecutorError as exc:
