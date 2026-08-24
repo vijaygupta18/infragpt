@@ -116,6 +116,9 @@ MCP_FORBIDDEN = re.compile(
 #: verb to inspect.
 INHERENTLY_READ_KINDS = frozenset(
     {"promql", "gcpmetric", "gcpalloydb", "gcpmetricsearch", "gcpmetricquery",
+     # gcpcompute issues only GETs against the Compute/Container APIs; the
+     # executor has no code path that builds any other HTTP method.
+     "gcpcompute",
      "awsmetric", "awselasticache"}
 )
 

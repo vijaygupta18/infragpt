@@ -249,6 +249,18 @@ GCP_CONNECTIONS: dict[str, GcpApiConnection] = {
         # per-node arithmetic (see registry/cloud.yaml).
         base_url="https://alloydb.googleapis.com/v1beta",
     ),
+    "gcp_compute": GcpApiConnection(
+        name="gcp_compute",
+        project=GCP_PROJECT,
+        region=GCP_REGION,
+        base_url="https://compute.googleapis.com/compute/v1",
+    ),
+    "gcp_container": GcpApiConnection(
+        name="gcp_container",
+        project=GCP_PROJECT,
+        region=GCP_REGION,
+        base_url="https://container.googleapis.com/v1",
+    ),
 }
 
 # Access token for the GCP APIs. In-cluster this comes from Workload Identity;

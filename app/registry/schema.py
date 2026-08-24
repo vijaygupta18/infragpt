@@ -176,7 +176,7 @@ class RegistryEntry(BaseModel):
     surface: Surface
     kind: Literal[
         "sql", "redis", "kubectl", "promql",
-        "gcpmetric", "gcpalloydb", "gcpmetricsearch", "gcpmetricquery",
+        "gcpmetric", "gcpalloydb", "gcpcompute", "gcpmetricsearch", "gcpmetricquery",
         "awsmetric", "awselasticache", "mcp", "shell", "sqlfree", "vmmeta",
         "gcpinsights", "code",
         # ClickHouse, split the same way sql/sqlfree is: `clickhouse` carries a

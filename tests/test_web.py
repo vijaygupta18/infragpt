@@ -58,6 +58,11 @@ def client(tmp_path, monkeypatch, signing_key):
     verifier.set_jwks({"keys": [signing_key[1]]})
     set_verifier(verifier)
 
+    # The case-file singleton binds the first database it sees; without this
+    # reset it carries one test's memory into the next.
+    from app.casefiles import reset_casefiles
+
+    reset_casefiles()
     with TestClient(create_app()) as c:
         yield c
 

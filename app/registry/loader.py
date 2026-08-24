@@ -50,6 +50,9 @@ _PAYLOAD_FIELD: dict[str, str] = {
     "gcpalloydb": "",
     "gcpmetricsearch": "",
     "gcpmetricquery": "",
+    # The operation name (instances/subnetworks/addresses/firewalls/nodepools),
+    # resolved against a fixed table in the executor — never a URL or a path.
+    "gcpcompute": "metric",
     "awsmetric": "metric",
     # The endpoint NAME, resolved against a fixed table in the executor. Not a
     # URL — the registry never carries one.
@@ -98,7 +101,10 @@ def _known_targets(kind: str) -> set[str]:
             return {METRICS_TARGET}
         case "code":
             return {"local"}
-        case "gcpmetric" | "gcpalloydb" | "gcpmetricsearch" | "gcpmetricquery" | "gcpinsights":
+        case (
+            "gcpmetric" | "gcpalloydb" | "gcpcompute"
+            | "gcpmetricsearch" | "gcpmetricquery" | "gcpinsights"
+        ):
             return set(config.GCP_CONNECTIONS)
         case "awsmetric" | "awselasticache":
             return set(config.AWS_CONNECTIONS)
@@ -270,6 +276,7 @@ def _check_surface(entry: RegistryEntry) -> None:
         "vmmeta": {Surface.METRICS},
         "gcpmetric": {Surface.CLOUD_GCP},
         "gcpalloydb": {Surface.CLOUD_GCP},
+        "gcpcompute": {Surface.CLOUD_GCP},
         "gcpmetricsearch": {Surface.CLOUD_GCP},
         "gcpmetricquery": {Surface.CLOUD_GCP},
         "gcpinsights": {Surface.CLOUD_GCP},

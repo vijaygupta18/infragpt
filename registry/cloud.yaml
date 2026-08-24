@@ -369,3 +369,94 @@ entries:
         description: How many queries to return.
     row_limit: 30
     timeout_s: 30
+
+  # ---- compute / network inventory ----------------------------------------
+  # These existed only through run_read_command composing gcloud. Typed entries
+  # are strictly better: no flag to get wrong, stable output shape, offered to
+  # the selector by name. All are project-wide reads via viewer IAM.
+
+  - name: gcp_instances
+    surface: cloud:gcp
+    kind: gcpcompute
+    metric: instances
+    description: >-
+      Compute Engine VM inventory: name, zone, status, machine type, internal
+      and external IP. Answers "which VMs exist / is X running / what is the
+      IP of Y". Optional `name` filters by substring. NOT for GKE pods — use
+      list_pods for those; these are raw VMs (databases, ClickHouse, jump
+      hosts) plus GKE node machines.
+    target: gcp_compute
+    params:
+      name:
+        type: string
+        required: false
+        description: Case-insensitive substring filter on the instance name.
+    row_limit: 100
+    timeout_s: 25
+
+  - name: gcp_subnets
+    surface: cloud:gcp
+    kind: gcpcompute
+    metric: subnetworks
+    description: >-
+      VPC subnetworks with region, primary CIDR, network, and secondary ranges
+      (the pod/service ranges GKE allocates from). Answers "which subnet is X
+      in / do these CIDRs overlap / where do pod IPs come from".
+    target: gcp_compute
+    params:
+      name:
+        type: string
+        required: false
+        description: Case-insensitive substring filter on the subnet name.
+    row_limit: 100
+    timeout_s: 25
+
+  - name: gcp_addresses
+    surface: cloud:gcp
+    kind: gcpcompute
+    metric: addresses
+    description: >-
+      Reserved static IPs: address, region/global scope, IN_USE or RESERVED,
+      and which resource uses each. Answers "what is this IP / which IP does
+      the LB use / do we have unused reserved addresses".
+    target: gcp_compute
+    params:
+      name:
+        type: string
+        required: false
+        description: Case-insensitive substring filter on the address name.
+    row_limit: 100
+    timeout_s: 25
+
+  - name: gcp_firewalls
+    surface: cloud:gcp
+    kind: gcpcompute
+    metric: firewalls
+    description: >-
+      VPC firewall rules: direction, network, source ranges, allowed
+      protocol:ports, and whether the rule is disabled. Answers "is port X
+      open from Y" — the classic silent killer where a connection times out
+      and tcpdump shows nothing, because GCP firewall drops are invisible to
+      the receiving host.
+    target: gcp_compute
+    params:
+      name:
+        type: string
+        required: false
+        description: Case-insensitive substring filter on the rule name.
+    row_limit: 150
+    timeout_s: 25
+
+  - name: gke_nodepools
+    surface: cloud:gcp
+    kind: gcpcompute
+    metric: nodepools
+    description: >-
+      GKE node pools across every cluster in the project: machine type, spot
+      or on-demand, autoscaling min/max, status, node version. Answers "which
+      pools exist / is X a spot pool / how far can Y scale". A workload
+      Pending on a taint or a pool at its autoscaling max shows up here.
+    target: gcp_container
+    params: {}
+    row_limit: 100
+    timeout_s: 25
