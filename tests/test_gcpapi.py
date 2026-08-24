@@ -141,23 +141,29 @@ async def test_int64_values_are_read(token, monkeypatch) -> None:
 
 
 async def test_instance_inventory_parses(token, monkeypatch) -> None:
-    _install_get(
-        monkeypatch,
-        {
-            "instances": [
-                {
-                    "name": (
-                        "projects/p/locations/us-central1/clusters/"
-                        "db-cluster/instances/reader"
-                    ),
-                    "instanceType": "READ_POOL",
-                    "state": "READY",
-                    "machineConfig": {"cpuCount": 4},
-                    "nodes": [{"id": "n1"}],
-                }
-            ]
-        },
-    )
+    # The executor now makes three shapes of call — clusters list, per-cluster
+    # instances, and the FULL get for a read pool — because the wildcard
+    # `clusters/-/instances` list takes ~14s server-side and the split takes
+    # ~2.5s. The stub routes by URL the way the real API does.
+    inst = {
+        "name": (
+            "projects/p/locations/us-central1/clusters/"
+            "db-cluster/instances/reader"
+        ),
+        "instanceType": "READ_POOL",
+        "state": "READY",
+        "machineConfig": {"cpuCount": 4},
+    }
+
+    async def fake_get(url, params, timeout_s):  # noqa: ANN001, ANN202
+        if url.endswith("/clusters"):
+            return {"clusters": [{"name": "projects/p/locations/x/clusters/db-cluster"}]}
+        if url.endswith("/instances"):
+            return {"instances": [inst]}
+        # the FULL get for the read pool
+        return {**inst, "nodes": [{"id": "n1"}]}
+
+    monkeypatch.setattr("app.executors.gcpapi._get", fake_get)
     res = await GcpAlloyDbExecutor().run(_entry("alloydb_instances"), {}, "gcp_alloydb")
     row = res.rows[0]
     assert row["cluster"] == "db-cluster"
