@@ -52,3 +52,4 @@ tmp/
 
 # Deployment coordinates for scripts/ship.sh — see scripts/ship.env.example
 scripts/ship.env
+.DS_Store

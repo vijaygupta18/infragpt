@@ -58,7 +58,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 def create_app() -> FastAPI:
     app = FastAPI(
         title="infragpt",
-        description="Read-only AI infra assistant for a production platform.",
+        description="Read-only AI infrastructure assistant.",
         version="0.1.0",
         lifespan=lifespan,
     )

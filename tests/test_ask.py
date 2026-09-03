@@ -226,7 +226,8 @@ def test_selector_is_only_offered_granted_surfaces(env, key, monkeypatch) -> Non
     _install_grid(monkeypatch, fake)
     _install_dispatch(monkeypatch, {})
 
-    client.post("/ask", json={"question": "check a key"}, headers=_headers(key[0], "ops@example.com"))
+    client.post("/ask", json={"question": "check a key"},
+                headers=_headers(key[0], "ops@example.com"))
     assert fake.offered_tools, "expected redis tools to be offered"
     assert all(t.startswith("redis_") for t in fake.offered_tools), fake.offered_tools
 
@@ -265,7 +266,8 @@ def test_selector_failure_is_reported_not_answered(env, key, monkeypatch) -> Non
     _install_grid(monkeypatch, FakeGrid(GridError("gateway unreachable")))
     _install_dispatch(monkeypatch, {})
 
-    resp = client.post("/ask", json={"question": "pods?"}, headers=_headers(key[0], "eng@example.com"))
+    resp = client.post("/ask", json={"question": "pods?"},
+                headers=_headers(key[0], "eng@example.com"))
     assert resp.status_code == 502
     assert "selector failed" in resp.json()["detail"]
 
@@ -280,7 +282,8 @@ def test_question_and_calls_are_audited(env, key, monkeypatch) -> None:
     _install_grid(monkeypatch, FakeGrid(sel))
     _install_dispatch(monkeypatch, {})
 
-    client.post("/ask", json={"question": "pods healthy?"}, headers=_headers(key[0], "eng@example.com"))
+    client.post("/ask", json={"question": "pods healthy?"},
+                headers=_headers(key[0], "eng@example.com"))
 
     records = [json.loads(line) for line in audit.audit_path().read_text().splitlines() if line]
     kinds = {r.get("kind") or r.get("type") for r in records}
@@ -359,7 +362,8 @@ def test_conversation_list_is_scoped_to_the_caller(env, key, monkeypatch) -> Non
     _install_grid(monkeypatch, FakeGrid(Selection(refusal="no")))
     _install_dispatch(monkeypatch, {})
 
-    client.post("/ask", json={"question": "alice only"}, headers=_headers(key[0], "alice@example.com"))
+    client.post("/ask", json={"question": "alice only"},
+                headers=_headers(key[0], "alice@example.com"))
     bob_list = client.get("/conversations", headers=_headers(key[0], "bob@example.com")).json()
     assert bob_list == []
 
@@ -427,7 +431,8 @@ def test_first_question_has_no_history_preamble(env, key, monkeypatch) -> None:
     _install_grid(monkeypatch, fake)
     _install_dispatch(monkeypatch, {})
 
-    client.post("/ask", json={"question": "first ever"}, headers=_headers(key[0], "eng@example.com"))
+    client.post("/ask", json={"question": "first ever"},
+                headers=_headers(key[0], "eng@example.com"))
     assert "Earlier in this conversation" not in seen[0]
 
 

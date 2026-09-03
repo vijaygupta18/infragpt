@@ -137,7 +137,7 @@ and ask for it.
 
 SYNTH_SYSTEM = f"""\
 You are the answer writer for infragpt, a read-only infrastructure assistant for \
-the platform.
+a production platform.
 
 {ARCHITECTURE}
 

@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 210" width="880" height="210" role="img" aria-label="Two lanes. In the naive lane an empty metric result becomes zero and is reported as healthy. In the infragpt lane the same empty result is labelled EMPTY and handed to a human.">
+  <title>The dangerous answer is the confident empty one</title>
+  <defs>
+    <style>
+      :root{--ink:#1b1a17;--ink-2:#565049;--muted:#8a837a;--line:#d9d3ca;--card:#ffffff;--ok:#1f7a4d;--warn:#b7791f;--fail:#c0392b;--acc:#1a6ad4}
+      @media (prefers-color-scheme:dark){:root{--ink:#ece7df;--ink-2:#b6ada1;--muted:#857c70;--line:#322e29;--card:#17150f;--ok:#46c88a;--warn:#e0b155;--fail:#e8705f;--acc:#6aa6f5}}
+      .t{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+      .s{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+      .ink{fill:var(--ink)}.in2{fill:var(--ink-2)}.mut{fill:var(--muted)}
+      .box{fill:var(--card);stroke:var(--line)}
+      /* Both packets leave together; each stops at the verdict its lane produces. */
+      .pk{animation:go 6s cubic-bezier(.65,0,.35,1) infinite}
+      @keyframes go{0%,8%{transform:translateX(0);opacity:0}12%{opacity:1}35%,42%{transform:translateX(230px)}65%,72%{transform:translateX(460px)}92%,100%{transform:translateX(690px);opacity:1}}
+      .v{opacity:0;animation:show 6s ease-in-out infinite}
+      @keyframes show{0%,90%{opacity:0}94%,100%{opacity:1}}
+      @media (prefers-reduced-motion:reduce){.pk{animation:none;transform:translateX(690px)}.v{animation:none;opacity:1}}
+    </style>
+  </defs>
+
+  <text x="0" y="20" class="s ink" font-size="15" font-weight="600">The dangerous answer is the confident empty one</text>
+  <text x="0" y="40" class="s mut" font-size="12">A wrong label returns no series. No series renders as zero. Zero reads as health. The same input, two lanes.</text>
+
+  <!-- lane 1: naive -->
+  <g transform="translate(0,66)">
+    <text x="0" y="14" class="t" font-size="10" fill="var(--fail)">NAIVE</text>
+    <line x1="60" y1="10" x2="866" y2="10" stroke="var(--line)" stroke-width="1.5"/>
+    <g><rect x="60" y="-11" width="150" height="42" rx="8" class="box"/><text x="135" y="8" class="s ink" font-size="12" text-anchor="middle" font-weight="600">no series</text><text x="135" y="22" class="t mut" font-size="9.5" text-anchor="middle">label was wrong</text></g>
+    <g><rect x="290" y="-11" width="150" height="42" rx="8" class="box"/><text x="365" y="8" class="s ink" font-size="12" text-anchor="middle" font-weight="600">0</text><text x="365" y="22" class="t mut" font-size="9.5" text-anchor="middle">rendered as a value</text></g>
+    <g><rect x="520" y="-11" width="150" height="42" rx="8" class="box"/><text x="595" y="8" class="s ink" font-size="12" text-anchor="middle" font-weight="600">“all healthy”</text><text x="595" y="22" class="t mut" font-size="9.5" text-anchor="middle">nothing to see</text></g>
+    <g class="v"><rect x="750" y="-11" width="116" height="42" rx="8" fill="var(--card)" stroke="var(--fail)" stroke-width="2"/><text x="808" y="8" class="s" font-size="12" text-anchor="middle" font-weight="600" fill="var(--fail)">wrong</text><text x="808" y="22" class="t" font-size="9.5" text-anchor="middle" fill="var(--fail)">and nobody knows</text></g>
+    <g class="pk"><circle cx="135" cy="10" r="5.5" fill="var(--fail)"/></g>
+  </g>
+
+  <!-- lane 2: infragpt -->
+  <g transform="translate(0,140)">
+    <text x="0" y="14" class="t" font-size="10" fill="var(--ok)">INFRAGPT</text>
+    <line x1="60" y1="10" x2="866" y2="10" stroke="var(--line)" stroke-width="1.5"/>
+    <g><rect x="60" y="-11" width="150" height="42" rx="8" class="box"/><text x="135" y="8" class="s ink" font-size="12" text-anchor="middle" font-weight="600">no series</text><text x="135" y="22" class="t mut" font-size="9.5" text-anchor="middle">label was wrong</text></g>
+    <g><rect x="290" y="-11" width="150" height="42" rx="8" class="box"/><text x="365" y="8" class="s ink" font-size="12" text-anchor="middle" font-weight="600">EMPTY</text><text x="365" y="22" class="t mut" font-size="9.5" text-anchor="middle">not FAIL, not OK</text></g>
+    <g><rect x="520" y="-11" width="150" height="42" rx="8" class="box"/><text x="595" y="8" class="s ink" font-size="12" text-anchor="middle" font-weight="600">“no series matched”</text><text x="595" y="22" class="t mut" font-size="9.5" text-anchor="middle">said in as many words</text></g>
+    <g class="v"><rect x="750" y="-11" width="116" height="42" rx="8" fill="var(--card)" stroke="var(--ok)" stroke-width="2"/><text x="808" y="8" class="s" font-size="12" text-anchor="middle" font-weight="600" fill="var(--ok)">a human judges</text><text x="808" y="22" class="t" font-size="9.5" text-anchor="middle" fill="var(--ok)">and the log learns</text></g>
+    <g class="pk"><circle cx="135" cy="10" r="5.5" fill="var(--ok)"/></g>
+  </g>
+</svg>

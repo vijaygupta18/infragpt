@@ -1,7 +1,7 @@
 [project]
 name = "infragpt"
 version = "0.1.0"
-description = "Read-only AI infra assistant for a production platform (infractl CLI + web chat)"
+description = "Read-only AI infrastructure assistant (infractl CLI + web chat)"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115",

@@ -1,116 +1,99 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 190" width="880" height="190" role="img" aria-label="infragpt — a read-only infrastructure assistant. A question flows through the registry, executors and evidence to an answer.">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 230" width="880" height="230" role="img" aria-label="infragpt — a read-only infrastructure assistant. A question flows through the registry, executors and evidence to an answer.">
   <title>infragpt — question to evidence to answer</title>
-
   <defs>
-    <!-- Theme-aware: GitHub renders SVGs in the reader's colour scheme, so the
-         palette is defined once and swapped under prefers-color-scheme. -->
     <style>
-      :root {
-        --ink:   #1b1a17;
-        --ink-2: #565049;
-        --muted: #8a837a;
-        --line:  #d9d3ca;
-        --card:  #ffffff;
-        --ok:    #1f7a4d;
-        --gcp:   #1a6ad4;
-      }
+      :root { --ink:#1b1a17; --ink-2:#565049; --muted:#8a837a; --line:#d9d3ca; --card:#ffffff; --ok:#1f7a4d; --acc:#1a6ad4; --glow:#1a6ad4; }
       @media (prefers-color-scheme: dark) {
-        :root {
-          --ink:   #ece7df;
-          --ink-2: #b6ada1;
-          --muted: #857c70;
-          --line:  #322e29;
-          --card:  #17150f;
-          --ok:    #46c88a;
-          --gcp:   #6aa6f5;
-        }
+        :root { --ink:#ece7df; --ink-2:#b6ada1; --muted:#857c70; --line:#322e29; --card:#17150f; --ok:#46c88a; --acc:#6aa6f5; --glow:#6aa6f5; }
       }
-      .t   { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-      .s   { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-      .ink { fill: var(--ink); }
-      .in2 { fill: var(--ink-2); }
-      .mut { fill: var(--muted); }
-      .box { fill: var(--card); stroke: var(--line); }
+      .t{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+      .s{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+      .ink{fill:var(--ink)} .in2{fill:var(--ink-2)} .mut{fill:var(--muted)}
+      .box{fill:var(--card);stroke:var(--line)}
 
-      /* One packet travels the pipeline, pausing at each stage. Motion is the
-         point of the diagram: it shows ORDER, which a static box-and-arrow
-         cannot. Respect reduced-motion by parking it at the answer. */
-      .packet { animation: flow 7s cubic-bezier(.65,0,.35,1) infinite; }
-      @keyframes flow {
-        0%,4%    { transform: translateX(0);    opacity: 0; }
-        7%       { opacity: 1; }
-        22%,30%  { transform: translateX(178px); }
-        46%,54%  { transform: translateX(356px); }
-        70%,78%  { transform: translateX(534px); }
-        94%,100% { transform: translateX(690px); opacity: 1; }
-      }
-      /* Highlight the BORDER as the packet arrives, never the text.
-         Animating group opacity dimmed the labels to 25% — a reader sees a
-         half-faded diagram and reads it as broken rather than as "not yet
-         reached". Text stays fully legible at every frame. */
-      .lit > rect { animation: lit 7s ease-in-out infinite; }
-      @keyframes lit {
-        0%,14%   { stroke: var(--line); stroke-width: 1; }
-        22%,30%  { stroke: var(--gcp);  stroke-width: 2; }
-        38%,100% { stroke: var(--line); stroke-width: 1; }
-      }
-      .p2 > rect { animation-delay: 1.6s } 
-      .p3 > rect { animation-delay: 3.2s } 
-      .p4 > rect { animation-delay: 4.8s }
+      /* Wordmark: the mark blinks like a prompt cursor, once per cycle. */
+      .cursor{animation:blink 1.2s steps(2,start) infinite}
+      @keyframes blink{to{visibility:hidden}}
 
-      @media (prefers-reduced-motion: reduce) {
-        .packet { animation: none; transform: translateX(690px); }
-        .lit > rect { animation: none; }
+      /* One packet travels the pipeline and pauses at each stage. Motion shows
+         ORDER, which a static box-and-arrow cannot. */
+      .packet{animation:flow 7s cubic-bezier(.65,0,.35,1) infinite}
+      @keyframes flow{
+        0%,4%{transform:translateX(0);opacity:0} 7%{opacity:1}
+        22%,30%{transform:translateX(178px)} 46%,54%{transform:translateX(356px)}
+        70%,78%{transform:translateX(534px)} 94%,100%{transform:translateX(690px);opacity:1}
+      }
+      /* Border lights as the packet arrives. Text never dims. */
+      .lit>rect{animation:lit 7s ease-in-out infinite}
+      @keyframes lit{0%,14%{stroke:var(--line);stroke-width:1}22%,30%{stroke:var(--acc);stroke-width:2}38%,100%{stroke:var(--line);stroke-width:1}}
+      .p2>rect{animation-delay:1.6s}.p3>rect{animation-delay:3.2s}.p4>rect{animation-delay:4.8s}
+      /* Stage captions swap in as the packet reaches them. */
+      .cap{opacity:0;animation:cap 7s ease-in-out infinite}
+      @keyframes cap{0%,18%{opacity:0}24%,34%{opacity:1}40%,100%{opacity:0}}
+      .c2{animation-delay:1.6s}.c3{animation-delay:3.2s}.c4{animation-delay:4.8s}
+      @media (prefers-reduced-motion:reduce){
+        .packet{animation:none;transform:translateX(690px)} .lit>rect{animation:none}
+        .cap{animation:none;opacity:1} .cursor{animation:none}
       }
     </style>
   </defs>
 
-  <text x="0" y="22" class="t ink" font-size="19" font-weight="600">infragpt</text>
-  <text x="118" y="22" class="s in2" font-size="13">a read-only infrastructure assistant</text>
-  <text x="0" y="44" class="s mut" font-size="12">the model chooses a function — it never writes the command</text>
+  <!-- wordmark -->
+  <g transform="translate(0,6)">
+    <rect x="0" y="0" width="34" height="34" rx="8" fill="var(--ink)"/>
+    <path d="M9 10.5 L15.5 17 L9 23.5" fill="none" stroke="var(--card)" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+    <rect x="17.5" y="21.2" width="8.5" height="2.6" rx="1.3" fill="var(--card)"/>
+    <circle cx="26" cy="9.5" r="3" fill="var(--ok)"/>
+    <text x="46" y="25" class="t ink" font-size="26" font-weight="600">infragpt<tspan class="cursor" fill="var(--acc)">_</tspan></text>
+    <text x="215" y="25" class="s in2" font-size="14">ask your infrastructure a question. get evidence back.</text>
+  </g>
+  <text x="0" y="66" class="s mut" font-size="12.5">The model chooses a function from a reviewed catalogue. It never writes a command, a query, or a line of shell.</text>
 
   <!-- pipeline -->
-  <g transform="translate(0,70)">
+  <g transform="translate(0,96)">
     <line x1="14" y1="30" x2="866" y2="30" stroke="var(--line)" stroke-width="1.5"/>
-
     <g>
-      <rect x="0"   y="10" width="150" height="42" rx="8" class="box"/>
-      <text x="75"  y="30" class="s ink"  font-size="12.5" text-anchor="middle" font-weight="600">Question</text>
-      <text x="75"  y="44" class="t mut"  font-size="9.5"  text-anchor="middle">english</text>
+      <rect x="0" y="10" width="150" height="42" rx="8" class="box"/>
+      <text x="75" y="30" class="s ink" font-size="12.5" text-anchor="middle" font-weight="600">Question</text>
+      <text x="75" y="44" class="t mut" font-size="9.5" text-anchor="middle">plain english</text>
     </g>
     <g class="lit">
       <rect x="178" y="10" width="150" height="42" rx="8" class="box"/>
-      <text x="253" y="30" class="s ink"  font-size="12.5" text-anchor="middle" font-weight="600">Registry</text>
-      <text x="253" y="44" class="t mut"  font-size="9.5"  text-anchor="middle">typed params</text>
+      <text x="253" y="30" class="s ink" font-size="12.5" text-anchor="middle" font-weight="600">Registry</text>
+      <text x="253" y="44" class="t mut" font-size="9.5" text-anchor="middle">function + typed params</text>
     </g>
     <g class="lit p2">
       <rect x="356" y="10" width="150" height="42" rx="8" class="box"/>
-      <text x="431" y="30" class="s ink"  font-size="12.5" text-anchor="middle" font-weight="600">Executors</text>
-      <text x="431" y="44" class="t mut"  font-size="9.5"  text-anchor="middle">read-only creds</text>
+      <text x="431" y="30" class="s ink" font-size="12.5" text-anchor="middle" font-weight="600">Executors</text>
+      <text x="431" y="44" class="t mut" font-size="9.5" text-anchor="middle">read-only credentials</text>
     </g>
     <g class="lit p3">
       <rect x="534" y="10" width="150" height="42" rx="8" class="box"/>
-      <text x="609" y="30" class="s ink"  font-size="12.5" text-anchor="middle" font-weight="600">Evidence</text>
-      <text x="609" y="44" class="t mut"  font-size="9.5"  text-anchor="middle">redacted · audited</text>
+      <text x="609" y="30" class="s ink" font-size="12.5" text-anchor="middle" font-weight="600">Evidence</text>
+      <text x="609" y="44" class="t mut" font-size="9.5" text-anchor="middle">redacted · audited</text>
     </g>
     <g class="lit p4">
       <rect x="712" y="10" width="154" height="42" rx="8" class="box"/>
-      <text x="789" y="30" class="s ink"  font-size="12.5" text-anchor="middle" font-weight="600">Answer</text>
-      <text x="789" y="44" class="t mut"  font-size="9.5"  text-anchor="middle">with its sources</text>
+      <text x="789" y="30" class="s ink" font-size="12.5" text-anchor="middle" font-weight="600">Answer</text>
+      <text x="789" y="44" class="t mut" font-size="9.5" text-anchor="middle">with every source</text>
     </g>
-
-    <!-- the travelling packet -->
+    <!-- captions under each stage, shown while the packet is there -->
+    <g class="cap"><text x="253" y="74" class="s in2" font-size="10.5" text-anchor="middle">the only output the model can produce</text></g>
+    <g class="cap c2"><text x="431" y="74" class="s in2" font-size="10.5" text-anchor="middle">re-checks read-only before it runs</text></g>
+    <g class="cap c3"><text x="609" y="74" class="s in2" font-size="10.5" text-anchor="middle">what ran, what returned, what failed</text></g>
+    <g class="cap c4"><text x="789" y="74" class="s in2" font-size="10.5" text-anchor="middle">an empty result is never “healthy”</text></g>
+    <!-- travelling packet -->
     <g class="packet">
-      <circle cx="75" cy="31" r="5.5" fill="var(--gcp)"/>
-      <circle cx="75" cy="31" r="5.5" fill="none" stroke="var(--gcp)" stroke-width="1" opacity=".35">
-        <animate attributeName="r" values="5.5;11;5.5" dur="1.6s" repeatCount="indefinite"/>
+      <circle cx="75" cy="31" r="5.5" fill="var(--acc)"/>
+      <circle cx="75" cy="31" r="5.5" fill="none" stroke="var(--acc)" stroke-width="1" opacity=".35">
+        <animate attributeName="r" values="5.5;12;5.5" dur="1.6s" repeatCount="indefinite"/>
         <animate attributeName="opacity" values=".35;0;.35" dur="1.6s" repeatCount="indefinite"/>
       </circle>
     </g>
   </g>
 
-  <g transform="translate(0,168)">
+  <g transform="translate(0,214)">
     <circle cx="5" cy="-4" r="4" fill="var(--ok)"/>
-    <text x="18" y="0" class="s in2" font-size="11.5">No write path exists — enforced by credentials, not by prompt instructions.</text>
+    <text x="18" y="0" class="s in2" font-size="11.5">No write path exists. That is enforced by credentials and replicas, not by prompt instructions.</text>
   </g>
 </svg>

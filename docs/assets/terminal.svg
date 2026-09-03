@@ -1,0 +1,94 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 300" width="880" height="300" role="img" aria-label="A terminal session: a question is typed, four read-only functions run and report, and an answer is given with its evidence.">
+  <title>infragpt — a question, its evidence, and the answer</title>
+  <defs>
+    <style>
+      :root{--bg:#1b1a17;--fg:#ece7df;--dim:#8a837a;--ok:#46c88a;--acc:#6aa6f5;--warn:#e0b155;--bar:#26241f;--frame:#d9d3ca}
+      @media (prefers-color-scheme:dark){:root{--bg:#0f0e0b;--bar:#1b1a17;--frame:#322e29}}
+      .t{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px}
+      .fg{fill:var(--fg)} .dim{fill:var(--dim)} .ok{fill:var(--ok)} .acc{fill:var(--acc)} .warn{fill:var(--warn)}
+
+      /* Typewriter: a clip rect widens in steps over the question text. */
+      #typing rect{animation:type 14s steps(60,end) infinite}
+      @keyframes type{0%,3%{width:0}17%,100%{width:560px}}
+      .caret{animation:caret 14s linear infinite}
+      @keyframes caret{0%{transform:translateX(0)}3%{transform:translateX(0)}17%{transform:translateX(560px)}100%{transform:translateX(560px)}}
+      .caretblink{animation:cb 1s steps(2,start) infinite}
+      @keyframes cb{to{visibility:hidden}}
+
+      /* Result lines land one at a time, after the question is typed. */
+      .ln{opacity:0;animation-duration:14s;animation-timing-function:ease-out;animation-iteration-count:infinite}
+      .l1{animation-name:l1} @keyframes l1{0%,22%{opacity:0;transform:translateY(4px)}25%,100%{opacity:1;transform:translateY(0)}}
+      .l2{animation-name:l2} @keyframes l2{0%,29%{opacity:0;transform:translateY(4px)}32%,100%{opacity:1;transform:translateY(0)}}
+      .l3{animation-name:l3} @keyframes l3{0%,36%{opacity:0;transform:translateY(4px)}39%,100%{opacity:1;transform:translateY(0)}}
+      .l4{animation-name:l4} @keyframes l4{0%,43%{opacity:0;transform:translateY(4px)}46%,100%{opacity:1;transform:translateY(0)}}
+      .l5{animation-name:l5} @keyframes l5{0%,54%{opacity:0;transform:translateY(4px)}57%,100%{opacity:1;transform:translateY(0)}}
+      .l6{animation-name:l6} @keyframes l6{0%,58%{opacity:0;transform:translateY(4px)}61%,100%{opacity:1;transform:translateY(0)}}
+      .l7{animation-name:l7} @keyframes l7{0%,62%{opacity:0;transform:translateY(4px)}65%,100%{opacity:1;transform:translateY(0)}}
+      /* Spinner glyph on the line currently running. */
+      .run{animation:run 14s linear infinite;opacity:0}
+      @keyframes run{0%,20%{opacity:0}21%,50%{opacity:1}51%,100%{opacity:0}}
+      @media (prefers-reduced-motion:reduce){
+        #typing rect{animation:none;width:560px} .caret,.caretblink{animation:none;visibility:hidden}
+        .ln{animation:none;opacity:1;transform:none} .run{animation:none;opacity:0}
+      }
+    </style>
+    <clipPath id="typing"><rect x="0" y="0" width="0" height="20"/></clipPath>
+  </defs>
+
+  <!-- window -->
+  <rect x="0.5" y="0.5" width="879" height="299" rx="12" fill="var(--bg)" stroke="var(--frame)"/>
+  <rect x="0.5" y="0.5" width="879" height="34" rx="12" fill="var(--bar)"/>
+  <rect x="0.5" y="22" width="879" height="13" fill="var(--bar)"/>
+  <circle cx="20" cy="17.5" r="5.5" fill="#e8705f"/><circle cx="38" cy="17.5" r="5.5" fill="#e0b155"/><circle cx="56" cy="17.5" r="5.5" fill="#46c88a"/>
+  <text x="440" y="22" class="t dim" text-anchor="middle" font-size="11.5">infractl ask</text>
+
+  <!-- prompt + typed question -->
+  <g transform="translate(24,60)">
+    <text x="0" y="0" class="t acc">❯</text>
+    <g transform="translate(18,0)">
+      <g clip-path="url(#typing)" transform="translate(0,-15)">
+        <text x="0" y="15" class="t fg">which APIs are throwing 5xx, and what are the actual errors?</text>
+      </g>
+      <g class="caret"><rect class="caretblink" x="1" y="-11" width="7" height="14" fill="var(--fg)" opacity=".8"/></g>
+    </g>
+  </g>
+
+  <!-- evidence -->
+  <g transform="translate(42,96)">
+    <g class="ln l1">
+      <text x="0"   y="0" class="t ok">✓</text>
+      <text x="20"  y="0" class="t fg">api_error_rates</text>
+      <text x="200" y="0" class="t dim">5 workloads ranked by error rate</text>
+    </g>
+    <g class="ln l2" transform="translate(0,22)">
+      <text x="0"   y="0" class="t ok">✓</text>
+      <text x="20"  y="0" class="t fg">api_error_codes</text>
+      <text x="200" y="0" class="t dim">500s dominate, not 502 — the app itself is raising</text>
+    </g>
+    <g class="ln l3" transform="translate(0,44)">
+      <text x="0"   y="0" class="t ok">✓</text>
+      <text x="20"  y="0" class="t fg">error_request_ids</text>
+      <text x="200" y="0" class="t dim">3 request ids pulled from the mesh access log</text>
+    </g>
+    <g class="ln l4" transform="translate(0,66)">
+      <text x="0"   y="0" class="t ok">✓</text>
+      <text x="20"  y="0" class="t fg">logs_for_request_id</text>
+      <text x="200" y="0" class="t dim">the exception, found in a service further down the call</text>
+    </g>
+    <g class="run" transform="translate(0,88)">
+      <text x="0" y="0" class="t acc">◐</text>
+      <text x="20" y="0" class="t dim">running read-only functions…</text>
+    </g>
+  </g>
+
+  <!-- answer -->
+  <g transform="translate(42,210)">
+    <g class="ln l5"><text x="0" y="0" class="t fg" font-weight="600">orders-api returns 500 on /quote/respond because it cannot find a search try</text></g>
+    <g class="ln l6" transform="translate(0,20)"><text x="0" y="0" class="t fg" font-weight="600">with an id the client sent — ~2.35/sec for the last 15 minutes, not a one-off.</text></g>
+    <g class="ln l7" transform="translate(0,44)">
+      <text x="0" y="0" class="t dim">4 calls · 0 failed · 0 empty · every result attached below the answer</text>
+    </g>
+  </g>
+
+  <text x="856" y="286" class="t dim" text-anchor="end" font-size="10.5">read-only · audited</text>
+</svg>
